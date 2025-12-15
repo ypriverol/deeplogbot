@@ -230,7 +230,7 @@ class ReportGenerator:
         
         for _, row in consolidated.sort_values('downloads_per_user', ascending=False).iterrows():
             canonical = group_to_canonical.get(row['group_id'], {})
-            display_city = canonical.get(city_field, '') if city_field in canonical else ''
+            display_city = canonical.get(city_field, '')
             if pd.isna(display_city) or display_city == '' or str(display_city) == 'N/A':
                 # Try to get from cities list
                 if 'cities' in row and row['cities'] and str(row['cities']) != 'N/A':
