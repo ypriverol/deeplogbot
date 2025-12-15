@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "logghostbuster"
+version = "0.1.0"
+description = "A hybrid Isolation Forest-based system for detecting bot behavior in log data"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "LogGhostbuster Contributors"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "pandas>=1.3.0",
+    "numpy>=1.20.0",
+    "duckdb>=0.8.0",
+    "scikit-learn>=1.0.0",
+    "scipy>=1.7.0",
+]
+
+[project.optional-dependencies]
+llm = [
+    "requests>=2.25.0",
+    "transformers>=4.20.0",
+]
+
+[project.scripts]
+logghostbuster = "logghostbuster.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["logghostbuster*"]
+
