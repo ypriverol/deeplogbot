@@ -4,9 +4,44 @@ LogGhostbuster: A hybrid Isolation Forest-based system for detecting bot behavio
 
 ## Overview
 
-LogGhostbuster uses machine learning (specifically Isolation Forest) to detect:
-1. **Bot downloads** - automated downloads from bot farms (user ID cycling pattern)
-2. **Download hubs** - legitimate mirrors/institutions with high download volumes
+LogGhostbuster is a hybrid machine learning system that detects bot behavior and download hubs in log data. It combines unsupervised anomaly detection with rule-based classification to identify suspicious download patterns.
+
+### Algorithm Overview
+
+The system follows a multi-stage pipeline:
+
+1. **Feature Extraction**: Extracts location-level behavioral features from log data:
+   - User activity patterns (unique users, downloads per user, user density per hour)
+   - Temporal patterns (hourly entropy, working hours ratio, yearly patterns)
+   - Anomaly indicators (spike ratios, latest year concentration, new location flags)
+   - Geographic patterns (country-level aggregations for coordinated detection)
+
+2. **Anomaly Detection**: Uses **Isolation Forest** to identify anomalous locations:
+   - Isolation Forest is an unsupervised algorithm that isolates anomalies by randomly selecting features and split values
+   - Locations with unusual behavioral patterns (short path lengths in the isolation tree) are flagged as anomalies
+   - The contamination parameter controls the expected proportion of anomalies (default: 15%)
+
+3. **Classification**: Classifies anomalies into categories using rule-based patterns:
+   - **BOT**: Detected when anomalies exhibit bot-like characteristics:
+     - Low downloads per user (< 100) combined with high user counts (> 5K-30K users)
+     - Sudden spikes in activity (high spike ratios and latest year concentration)
+     - New locations with suspicious patterns
+     - Geographic bot farms (coordinated patterns across country-level metrics)
+   
+   - **DOWNLOAD_HUB**: Detected when anomalies show hub-like characteristics:
+     - Very high downloads per user (> 500) - mirrors/single-user hubs
+     - High total downloads (> 150K) with moderate downloads per user (50-500) and regular working hours patterns - research institutions
+
+4. **Geographic Grouping** (optional): Groups nearby hub locations using:
+   - Haversine distance calculation (default: 10km threshold)
+   - Optional LLM-based canonical naming for institutions
+
+5. **Output Generation**: Produces annotated data and comprehensive reports with detection results.
+
+### Detection Targets
+
+- **Bot downloads** - Automated downloads from bot farms (characterized by user ID cycling with low downloads per user)
+- **Download hubs** - Legitimate mirrors/institutions with high download volumes (characterized by high downloads per user or regular institutional patterns)
 
 ## Installation
 
@@ -52,23 +87,29 @@ results = run_bot_annotator(
 
 - `logghostbuster/`
   - `__init__.py` - Package initialization and exports
-  - `cli.py` - Command-line interface
-  - `main.py` - Main bot detection pipeline
-  - `schema.py` - Schema definitions for different log formats
+  - `main.py` - Main bot detection pipeline and CLI
+  - `utils/` - Utility functions package
+    - `__init__.py` - General utilities (logging, formatting) and exports
+    - `geography.py` - Geographic utility functions (haversine distance, coordinate parsing, location grouping)
   - `features/` - Feature extraction package
     - `__init__.py` - Feature extraction exports
+    - `schema.py` - Schema definitions for different log formats
     - `base.py` - Base feature extractor class
     - `extraction.py` - Main feature extraction function
     - `standard.py` - Standard extractors (yearly, time-of-day, country-level)
     - `providers/` - Provider-specific extractors
       - `ebi.py` - EBI-specific extractors (if needed)
-  - `models.py` - ML models (Isolation Forest, feature importance)
-  - `classification.py` - Bot and download hub classification logic
-  - `geography.py` - Geographic utilities for location grouping
-  - `llm_utils.py` - LLM utilities for canonical naming (optional)
-  - `annotation.py` - Annotation utilities for marking locations
-  - `reporting.py` - Report generation
-  - `utils.py` - Utility functions
+  - `isoforest/` - Isolation Forest model package
+    - `__init__.py` - Model exports
+    - `models.py` - Isolation Forest training and feature importance
+    - `classification.py` - Bot and download hub classification logic
+  - `llm/` - LLM utilities package
+    - `__init__.py` - LLM exports
+    - `utils.py` - LLM utilities for canonical naming (optional)
+  - `reports/` - Report generation and annotation package
+    - `__init__.py` - Report exports
+    - `annotation.py` - Annotation utilities for marking locations with bot/download_hub flags
+    - `reporting.py` - Generic report generator
 
 ## Custom Schemas and Feature Extractors
 

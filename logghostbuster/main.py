@@ -1,16 +1,16 @@
-"""Main bot detection pipeline."""
+"""Main bot detection pipeline and CLI."""
 
 import os
+import argparse
 import pandas as pd
 import duckdb
 
 from .utils import logger, format_number
 from .features import extract_location_features
-from .models import train_isolation_forest, compute_feature_importances
-from .classification import classify_locations
-from .annotation import annotate_downloads
-from .reporting import generate_report
-from .schema import LogSchema, EBI_SCHEMA
+from .isoforest import train_isolation_forest, compute_feature_importances, classify_locations
+from .reports import annotate_downloads
+from .reports import generate_report
+from .features.schema import LogSchema, EBI_SCHEMA
 from .features.base import BaseFeatureExtractor
 from typing import Optional, List
 
@@ -195,7 +195,9 @@ def run_bot_annotator(
         logger.info(f"Location analysis saved to: {analysis_file}")
         
         # Generate report
-        generate_report(analysis_df, bot_locs, hub_locs, stats, output_dir)
+        generate_report(analysis_df, bot_locs, hub_locs, stats, output_dir, 
+                       schema=schema if schema is not None else EBI_SCHEMA,
+                       available_features=feature_columns)
         
         logger.info("\n" + "=" * 70)
         logger.info("Bot Annotation Complete!")
@@ -217,4 +219,45 @@ def run_bot_annotator(
         raise
     finally:
         conn.close()
+
+
+def main():
+    """Main entry point for CLI."""
+    parser = argparse.ArgumentParser(
+        description='Annotate downloads with bot and download_hub flags using ML detection'
+    )
+    parser.add_argument('--input', '-i', 
+                       default='original_data/data_downloads_parquet.parquet',
+                       help='Input parquet file')
+    parser.add_argument('--output', '-out',
+                       default=None,
+                       help='Output parquet file (default: overwrites input)')
+    parser.add_argument('--output-dir', '-o',
+                       default='output/bot_analysis',
+                       help='Output directory for reports')
+    parser.add_argument('--contamination', '-c', type=float, default=0.15,
+                       help='Expected proportion of anomalies (default: 0.15)')
+    parser.add_argument('--compute-importances', action='store_true',
+                       help='Compute feature importances (optional, slower)')
+    
+    args = parser.parse_args()
+    
+    try:
+        run_bot_annotator(
+            args.input,
+            args.output,
+            args.output_dir,
+            args.contamination,
+            compute_importances=args.compute_importances
+        )
+        
+        logger.info("\nDone!")
+        
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        raise
+
+
+if __name__ == '__main__':
+    main()
 

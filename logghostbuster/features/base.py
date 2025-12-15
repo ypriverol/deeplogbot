@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import pandas as pd
 
-from ..schema import LogSchema
+from .schema import LogSchema
 from ..utils import logger
 
 

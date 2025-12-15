@@ -6,7 +6,7 @@ import numpy as np
 from typing import Optional, List
 
 from ..utils import logger
-from ..schema import LogSchema, EBI_SCHEMA
+from .schema import LogSchema, EBI_SCHEMA
 from .base import BaseFeatureExtractor
 from .standard import (
     YearlyPatternExtractor,

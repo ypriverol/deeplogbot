@@ -38,7 +38,7 @@ llm = [
 ]
 
 [project.scripts]
-logghostbuster = "logghostbuster.cli:main"
+logghostbuster = "logghostbuster.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

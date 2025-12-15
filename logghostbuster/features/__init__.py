@@ -7,6 +7,7 @@ from .standard import (
     CountryLevelExtractor,
 )
 from .extraction import extract_location_features, extract_location_features_ebi
+from .schema import LogSchema, EBI_SCHEMA, get_schema, register_schema, SCHEMA_REGISTRY
 
 __all__ = [
     "BaseFeatureExtractor",
@@ -15,4 +16,9 @@ __all__ = [
     "CountryLevelExtractor",
     "extract_location_features",
     "extract_location_features_ebi",
+    "LogSchema",
+    "EBI_SCHEMA",
+    "get_schema",
+    "register_schema",
+    "SCHEMA_REGISTRY",
 ]
