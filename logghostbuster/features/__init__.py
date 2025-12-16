@@ -1,7 +1,6 @@
 """Feature extraction package for logghostbuster."""
 
 from .base import BaseFeatureExtractor
-from .extraction import extract_location_features
 from .providers.ebi import (
     extract_location_features_ebi,
     YearlyPatternExtractor,
@@ -9,6 +8,9 @@ from .providers.ebi import (
     CountryLevelExtractor,
 )
 from .schema import LogSchema, EBI_SCHEMA, get_schema, register_schema, SCHEMA_REGISTRY
+
+# For backward compatibility, export extract_location_features as alias to EBI version
+from .providers.ebi import extract_location_features
 
 __all__ = [
     "BaseFeatureExtractor",
