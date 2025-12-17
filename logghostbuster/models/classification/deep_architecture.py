@@ -259,11 +259,11 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     if 'working_hours_ratio' not in df.columns:
         df['working_hours_ratio'] = 0.0
 
-    # 1. Bot classification: Classify each location individually (same patterns as rule-based)
+    # 1. Bot classification: Classify each location individually (same core patterns as rule-based)
     bot_mask = (
         df['is_anomaly'] &
         (
-            # Pattern 1: High user count with low downloads per user
+            # Pattern 1: High user count with very low downloads per user
             (
                 (df['downloads_per_user'] < 12) &
                 (df['unique_users'] > 7000)
@@ -274,72 +274,11 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 (df['downloads_per_user'] < 100) &
                 (df['downloads_per_user'] > 10)
             ) |
-            # Pattern 1c: High user count (>15K) with moderate-low DL/user (<80)
+            # Pattern 1c: High user count (>15K) with moderate‑low DL/user (<80)
             (
                 (df['unique_users'] > 15000) &
                 (df['downloads_per_user'] < 80) &
                 (df['downloads_per_user'] > 8)
-            ) |
-            # Pattern 2: Sudden surge in latest year
-            (
-                (df['fraction_latest_year'] > 0.4) &
-                (df['downloads_per_user'] < 25) &
-                (df['unique_users'] > 2000) &
-                (df['spike_ratio'] > 2)
-            ) |
-            # Pattern 3: New locations with suspicious patterns
-            (
-                (df['is_new_location'] == 1) &
-                (df['downloads_per_user'] < 15) &
-                (df['unique_users'] > 3000)
-            ) |
-            # Pattern 4: Massive spike (5x+ increase)
-            (
-                (df['spike_ratio'] > 5) &
-                (df['downloads_per_user'] < 15) &
-                (df['unique_users'] > 5000) &
-                (df['years_before_latest'] > 0)
-            ) |
-            # Pattern 5: Moderate spike with multiple suspicious signals
-            (
-                (df['spike_ratio'] > 3) &
-                (df['fraction_latest_year'] > 0.5) &
-                (df['downloads_per_user'] < 12) &
-                (df['unique_users'] > 5000)
-            ) |
-            # Pattern 6: Lower user threshold but high spike + latest year concentration
-            (
-                (df['spike_ratio'] > 1.5) &
-                (df['fraction_latest_year'] > 0.5) &
-                (df['downloads_per_user'] < 20) &
-                (df['unique_users'] > 2000) &
-                (df['years_before_latest'] >= 1)
-            ) |
-            # Pattern 7: Very high latest year concentration
-            (
-                (df['fraction_latest_year'] > 0.7) &
-                (df['downloads_per_user'] < 30) &
-                (df['unique_users'] > 1000)
-            ) |
-            # Pattern 8: High spike ratio with moderate concentration
-            (
-                (df['spike_ratio'] > 3) &
-                (df['fraction_latest_year'] > 0.7) &
-                (df['downloads_per_user'] < 35) &
-                (df['unique_users'] > 300)
-            ) |
-            # Pattern 9: New locations with moderate activity
-            (
-                (df['is_new_location'] == 1) &
-                (df['downloads_per_user'] < 35) &
-                (df['unique_users'] > 500) &
-                (df['total_downloads'] > 3000)
-            ) |
-            # Pattern 10: Extreme latest year concentration (>85%)
-            (
-                (df['fraction_latest_year'] > 0.85) &
-                (df['downloads_per_user'] < 50) &
-                (df['unique_users'] > 100)
             )
         )
     )
