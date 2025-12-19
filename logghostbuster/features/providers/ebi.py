@@ -328,8 +328,7 @@ class TimeWindowExtractor(BaseFeatureExtractor):
             {self.schema.location_field} as geo_location,
             {time_window_expr} as window_start,
             COUNT(*) as downloads_in_window,
-            COUNT(DISTINCT {self.schema.user_field}) as unique_users_in_window,
-            CAST(COUNT(*) AS DOUBLE) / NULLIF(COUNT(DISTINCT {self.schema.user_field}), 0) as downloads_per_user_in_window
+            COUNT(DISTINCT {self.schema.user_field}) as unique_users_in_window
         FROM read_parquet('{escaped_path}')
         WHERE {self.schema.location_field} IS NOT NULL
         AND {self.schema.timestamp_field} IS NOT NULL
@@ -340,34 +339,51 @@ class TimeWindowExtractor(BaseFeatureExtractor):
         
         window_df = conn.execute(window_query).df()
 
-        # For each location, create a sequence of the last `sequence_length` windows
-        location_sequences = {}
-        for geo_loc, group_df in window_df.groupby('geo_location'):
-            # Sort by time window and get the last `sequence_length` entries
-            sorted_group = group_df.sort_values('window_start').tail(self.sequence_length)
+        if window_df.empty:
+            df['time_series_features'] = [[0.0] * 3] * len(df) # Assume 3 features in sequence
+            return df
+
+        # Define features to keep in the sequence
+        features_to_keep = [
+            'downloads_in_window',
+            'unique_users_in_window',
+            'downloads_per_user_in_window'
+        ]
+
+        def create_padded_sequence(group):
+            sorted_group = group.sort_values('window_start').tail(self.sequence_length)
+            
+            # Calculate downloads_per_user_in_window in Pandas
+            sorted_group['downloads_per_user_in_window'] = sorted_group['downloads_in_window'] / sorted_group['unique_users_in_window'].replace(0, np.nan)
+            sorted_group['downloads_per_user_in_window'] = sorted_group['downloads_per_user_in_window'].fillna(0.0)
+            
+            # Extract only the feature columns as a NumPy array
+            sequence_values = sorted_group[features_to_keep].values
             
             # Pad with zeros if fewer than `sequence_length` windows
-            if len(sorted_group) < self.sequence_length:
-                padding_needed = self.sequence_length - len(sorted_group)
-                # Create empty DataFrame for padding with 0s for numeric columns
-                padding_df = pd.DataFrame(0.0, index=np.arange(padding_needed), columns=sorted_group.select_dtypes(include=np.number).columns)
-                # Ensure 'window_start' column is also handled
-                padding_df['window_start'] = pd.NaT
-                padding_df['geo_location'] = geo_loc
-                sorted_group = pd.concat([padding_df, sorted_group], ignore_index=True).tail(self.sequence_length)
+            if len(sequence_values) < self.sequence_length:
+                padding_needed = self.sequence_length - len(sequence_values)
+                # Use np.pad to add zeros to the beginning of the sequence
+                padded_sequence = np.pad(sequence_values, ((padding_needed, 0), (0, 0)), 'constant', constant_values=0.0)
+            else:
+                padded_sequence = sequence_values
+            
+            return padded_sequence.tolist() # Convert back to list of lists for storage
 
-            # Convert to list of dicts for easy storage
-            # Exclude 'geo_location' and 'window_start' from the feature vectors
-            features_to_keep = [
-                'downloads_in_window',
-                'unique_users_in_window',
-                'downloads_per_user_in_window'
-            ]
-            location_sequences[geo_loc] = sorted_group[features_to_keep].values.tolist()
+        # Apply the function to each group and map back to the original DataFrame
+        # This is more efficient than the Python loop, as it leverages Pandas' optimized group-by-apply
+        location_sequences = window_df.groupby('geo_location', group_keys=False).apply(create_padded_sequence)
         
-        # Add the sequences to the main DataFrame
+        # Map sequences to locations, using default empty sequence for missing locations
         df['time_series_features'] = df['geo_location'].map(location_sequences)
-        df['time_series_features'] = df['time_series_features'].apply(lambda x: x if isinstance(x, list) else [[0.0]*len(features_to_keep)]*self.sequence_length)
+        
+        # Fill missing locations with default sequence (create new list for each to avoid reference issues)
+        missing_locations_mask = df['time_series_features'].isna()
+        if missing_locations_mask.any():
+            df.loc[missing_locations_mask, 'time_series_features'] = [
+                [[0.0] * len(features_to_keep)] * self.sequence_length
+                for _ in range(missing_locations_mask.sum())
+            ]
 
         return df
 

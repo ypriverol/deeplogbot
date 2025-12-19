@@ -87,6 +87,10 @@ Options:
 - `--sample-size, -s`: Randomly sample N records from all years before processing (e.g., 1000000 for 1M records)
 - `--classification-method, -m`: Classification method - `rules` for rule-based (default), `ml` for supervised ML-based, or `ml-unsupervised` for unsupervised ML-based
 
+### Known Issues
+
+- **Deep Classification with Large Sample Sizes**: When using the `--classification-method deep`, the algorithm encounters an issue and may get stuck during the data loading and feature extraction phase (specifically within the `TimeWindowExtractor`) when a `--sample-size` of 50,000,000 (50M) records is specified. Interestingly, the process completes successfully for smaller sample sizes (e.g., 5M records) and for the entire dataset without any sampling. This suggests a specific bottleneck at the 50M sample size. This issue is currently under investigation. For large datasets, consider using no `--sample-size` or a smaller `sample-size` (e.g., 5M) until this is resolved.
+
 ### Python API
 
 ```python
