@@ -1,9 +1,21 @@
-"""Provider-specific feature extractors."""
+"""Provider-specific feature extractors and convenience functions."""
 
-# This package contains provider-specific feature extractors
+from .ebi import (
+    extract_location_features_ebi,
+    YearlyPatternExtractor,
+    TimeOfDayExtractor,
+    CountryLevelExtractor,
+)
+
+# This package contains provider-specific feature extractors and convenience functions
 # Examples:
-# - EBI-specific extractors (if needed)
+# - EBI-specific extractors and convenience functions
 # - AWS CloudWatch extractors
 # - Custom provider extractors
 
-__all__ = []
+__all__ = [
+    "extract_location_features_ebi",
+    "YearlyPatternExtractor",
+    "TimeOfDayExtractor",
+    "CountryLevelExtractor",
+]

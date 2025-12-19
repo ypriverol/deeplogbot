@@ -4,7 +4,7 @@ import os
 import json
 import re
 
-from .utils import logger
+from ..utils import logger
 
 
 def get_llm_canonical_name(group_members):

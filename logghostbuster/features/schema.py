@@ -26,8 +26,8 @@ class LogSchema:
     year_field: Optional[str] = "year"  # Optional, will be extracted from timestamp if None
     
     # Filtering thresholds
-    min_location_downloads: int = 100  # Minimum downloads for a location to be considered
-    min_year: int = 2021  # Minimum year to include in analysis
+    min_location_downloads: int = 1  # Minimum downloads for a location to be considered (default: 1 to include all users)
+    min_year: int = 2020  # Minimum year to include in analysis
     
     # Time zone settings
     working_hours_start: int = 9  # UTC hour for working hours start (0-23)
@@ -68,8 +68,8 @@ EBI_SCHEMA = LogSchema(
     project_field="accession",
     timestamp_field="timestamp",
     year_field="year",
-    min_location_downloads=100,
-    min_year=2021,
+    min_location_downloads=1,  # Include all locations (can be increased to filter noise)
+    min_year=2020,
 )
 
 

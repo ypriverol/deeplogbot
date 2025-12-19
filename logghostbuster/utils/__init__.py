@@ -1,4 +1,4 @@
-"""Utility functions for LogGhostbuster."""
+"""Utility functions package."""
 
 import logging
 import sys
@@ -35,3 +35,14 @@ def format_number(num):
         return f'{num/1e3:.1f}K'
     return str(int(num))
 
+
+# Geographic utilities
+from .geography import haversine_distance, parse_geo_location, group_nearby_locations_with_llm
+
+__all__ = [
+    "logger",
+    "format_number",
+    "haversine_distance",
+    "parse_geo_location",
+    "group_nearby_locations_with_llm",
+]

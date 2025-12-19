@@ -1,0 +1,5 @@
+duckdb:
+  memory_limit: "10GB"
+  max_temp_directory_size: "10GiB"
+  temp_directory: "./duckdb-tmp/"
+

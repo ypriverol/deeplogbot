@@ -6,7 +6,7 @@ from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.inspection import permutation_importance
 
-from .utils import logger
+from ...utils import logger
 
 
 def train_isolation_forest(df, feature_columns, contamination=0.05):

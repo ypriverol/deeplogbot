@@ -1,0 +1,16 @@
+name: logghostbuster_env
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pandas
+  - "numpy<2.0"
+  - scikit-learn
+  - pyyaml # Added pyyaml dependency
+  - pytorch=1.13.1
+  - cpuonly
+  - duckdb
+  - pip
+  - pip:
+    - pyarrow

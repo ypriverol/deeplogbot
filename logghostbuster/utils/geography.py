@@ -1,15 +1,25 @@
-"""Geographic utilities for location grouping."""
+"""Geographic utility functions."""
 
-import pandas as pd
 from math import radians, cos, sin, asin, sqrt
+from typing import Tuple, Optional, Dict
+import pandas as pd
 
-from .utils import logger
-from .llm_utils import get_llm_canonical_name
 
-
-def haversine_distance(lat1, lon1, lat2, lon2):
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """
     Calculate the great circle distance between two points on Earth (in km).
+    
+    Uses the Haversine formula to compute the distance between two points
+    on the surface of a sphere given their latitudes and longitudes.
+    
+    Args:
+        lat1: Latitude of first point (in degrees)
+        lon1: Longitude of first point (in degrees)
+        lat2: Latitude of second point (in degrees)
+        lon2: Longitude of second point (in degrees)
+        
+    Returns:
+        Distance between the two points in kilometers
     """
     # Convert to radians
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
@@ -23,21 +33,40 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return c * r
 
 
-def parse_geo_location(geo_loc_str):
-    """Parse 'lat,lon' string to (lat, lon) tuple."""
+def parse_geo_location(geo_loc_str: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Parse 'lat,lon' string to (lat, lon) tuple.
+    
+    Args:
+        geo_loc_str: String in format "latitude,longitude" (e.g., "51.1234,-0.5678")
+        
+    Returns:
+        Tuple of (latitude, longitude) as floats, or (None, None) if parsing fails
+    """
     try:
         parts = geo_loc_str.split(',')
         return float(parts[0].strip()), float(parts[1].strip())
-    except:
+    except (ValueError, IndexError, AttributeError):
         return None, None
 
 
-def group_nearby_locations_with_llm(hub_locations, max_distance_km=10, use_llm=True):
+def group_nearby_locations_with_llm(hub_locations: pd.DataFrame, max_distance_km: int = 10, use_llm: bool = True) -> Dict[str, str]:
     """
     Group nearby hub locations using geographic distance and optionally LLM.
     
     Returns a mapping: original_geo_location -> group_id (canonical location)
+    
+    Args:
+        hub_locations: DataFrame with hub locations including 'geo_location', 'country', 'city', etc.
+        max_distance_km: Maximum distance in km for grouping locations
+        use_llm: Whether to use LLM for canonical naming
+        
+    Returns:
+        Dictionary mapping geo_location to canonical location
     """
+    from ..utils import logger
+    from ..llm import get_llm_canonical_name
+    
     logger.info(f"Grouping {len(hub_locations)} hub locations (max_distance={max_distance_km}km)...")
     logger.info("  Step 1: Geographic distance-based grouping...")
     
@@ -112,4 +141,3 @@ def group_nearby_locations_with_llm(hub_locations, max_distance_km=10, use_llm=T
     logger.info(f"Grouped into {n_groups} consolidated locations (from {len(locations_with_coords)} original)")
     
     return groups
-

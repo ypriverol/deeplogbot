@@ -1,0 +1,75 @@
+bots:
+  description: >
+    Bot rules: anomalous locations with many users and low or moderate downloads
+    per user. These rules are designed to be stable over time and do not depend
+    on latest-year spikes or 'new location' heuristics.
+  require_anomaly: true
+  patterns:
+    - id: high_users_low_dl
+      description: High user count with very low downloads per user.
+      unique_users:
+        min: 7000
+      downloads_per_user:
+        max: 12
+
+    - id: very_high_users_moderate_dl
+      description: Very high user count with moderate downloads per user.
+      unique_users:
+        min: 25000
+      downloads_per_user:
+        min: 10
+        max: 100
+
+    - id: high_users_moderate_low_dl
+      description: High user count with moderate-low downloads per user.
+      unique_users:
+        min: 15000
+      downloads_per_user:
+        min: 8
+        max: 80
+
+hubs:
+  description: >
+    Hub rules: anomalous locations with very high downloads per user (mirrors)
+    or high total volume with moderate downloads per user and regular working
+    hours (research institutions).
+  require_anomaly: true
+  patterns:
+    - id: mirrors
+      description: Very high downloads per user (mirrors/single-user hubs).
+      downloads_per_user:
+        min: 500
+
+    - id: research_institutions
+      description: High total downloads with moderate downloads per user and
+        regular working hours.
+      total_downloads:
+        min: 150000
+      downloads_per_user:
+        min: 50
+        max: 500
+      unique_users:
+        min: 1000
+      working_hours_ratio:
+        min: 0.25
+
+independent_users:
+  description: >
+    Legitimate locations with very few users and very low downloads per user.
+  patterns:
+    - id: low_users_low_dl
+      description: Few users and low downloads per user with low anomaly score.
+      unique_users:
+        max: 5
+      downloads_per_user:
+        max: 3
+      anomaly_score:
+        max: 0.1
+
+other:
+  description: >
+    Anomalous locations that do not match any BOT or DOWNLOAD_HUB pattern are
+    currently labeled as 'other'. These are candidates for future refinement,
+    e.g. via clustering or LLM-based labeling.
+
+

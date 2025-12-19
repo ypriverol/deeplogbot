@@ -3,7 +3,7 @@
 import os
 import pandas as pd
 
-from .utils import logger
+from ..utils import logger
 
 
 def annotate_downloads(conn, input_parquet, output_parquet, 

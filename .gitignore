@@ -212,3 +212,10 @@ __marimo__/
 
 # Output directory
 output/
+.codacy/
+.cursor/
+.duckdb-tmp/
+docs/2407.05639v2.pdf
+
+# Cursor context files
+cursor_context/
