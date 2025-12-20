@@ -555,7 +555,7 @@ def generate_all_visualizations(
     except Exception as e:
         logger.warning(f"Failed to create UMAP plot: {e}")
     
-    # 4. Category distribution
+    # 5. Category distribution
     try:
         plot_category_distribution(
             df,
