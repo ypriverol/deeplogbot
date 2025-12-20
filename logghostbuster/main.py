@@ -109,6 +109,7 @@ def run_bot_annotator(
     time_window: str = 'month',
     sequence_length: int = 12,
     annotate: bool = True,
+    output_strategy: str = 'new_file',
 ):
     """
     Main function to detect bots and download hubs, and annotate the parquet file.
@@ -128,6 +129,10 @@ def run_bot_annotator(
                   (default: True). NOTE: When sampling is enabled (sample_size is not None),
                   annotation is automatically disabled to avoid overwriting the full dataset
                   with a sampled subset.
+        output_strategy: How to handle output file (default: 'new_file'):
+            - 'new_file': Create a new file with '_annotated' suffix (safest, recommended)
+            - 'reports_only': Don't write to parquet, only generate reports
+            - 'overwrite': Rewrite the original file (may fail if file is locked)
     
     Returns:
         Dictionary with detection results and statistics
@@ -322,13 +327,17 @@ def run_bot_annotator(
         logger.info("Step 4: Annotating downloads")
         logger.info("=" * 70)
         
+        annotated_file = None
         if effective_annotate:
-            # Output to specified file or same file (overwrite)
-            if output_parquet is None:
+            # Handle output strategy
+            # For overwrite strategy, default to input file if no output specified
+            # For new_file strategy, output_parquet can be None (auto-generate) or specified by user
+            if output_strategy == 'overwrite' and output_parquet is None:
                 output_parquet = input_parquet
             
-            annotate_downloads(conn, actual_input_parquet, output_parquet, 
-                              bot_locs, hub_locs, output_dir)
+            annotated_file = annotate_downloads(conn, actual_input_parquet, output_parquet, 
+                                                bot_locs, hub_locs, output_dir,
+                                                output_strategy=output_strategy)
         else:
             logger.info("Annotation skipped (annotate=False).")
         
@@ -422,8 +431,10 @@ def run_bot_annotator(
         logger.info("Bot Annotation Complete!")
         logger.info("=" * 70)
         logger.info(f"\nOutput files:")
-        if effective_annotate and output_parquet is not None:
-            logger.info(f"  - {output_parquet} (annotated with 'bot' and 'download_hub' columns)")
+        if annotated_file:
+            logger.info(f"  - {annotated_file} (annotated with 'bot' and 'download_hub' columns)")
+        elif effective_annotate and output_strategy == 'reports_only':
+            logger.info("  - No parquet file written (reports_only strategy)")
         logger.info(f"  - {output_dir}/bot_detection_report.txt")
         logger.info(f"  - {output_dir}/location_analysis.csv")
         
@@ -431,7 +442,7 @@ def run_bot_annotator(
             'bot_locations': len(bot_locs),
             'hub_locations': len(hub_locs),
             'stats': stats,
-            'output_parquet': output_parquet
+            'output_parquet': annotated_file if annotated_file else None
         }
         
     except Exception as e:
@@ -455,7 +466,10 @@ def main():
                        help='Input parquet file')
     parser.add_argument('--output', '-out',
                        default=None,
-                       help='Output parquet file (default: overwrites input)')
+                       help='Output parquet file. Behavior depends on --output-strategy: '
+                            'new_file: creates this file (or auto-generates with _annotated suffix if not specified), '
+                            'reports_only: ignored, '
+                            'overwrite: overwrites this file (or input file if not specified)')
     parser.add_argument('--output-dir', '-o',
                        default='output/bot_analysis',
                        help='Output directory for reports')
@@ -475,6 +489,9 @@ def main():
                        help='Time window granularity for time-series features in deep method (default: month)')
     parser.add_argument('--sequence-length', type=int, default=12,
                        help='Number of time windows to include in the time-series sequence for deep method (default: 12)')
+    parser.add_argument('--output-strategy', type=str, default='new_file',
+                       choices=['new_file', 'reports_only', 'overwrite'],
+                       help='Output file strategy: "new_file" creates annotated file with _annotated suffix (default), "reports_only" only generates reports, "overwrite" rewrites original file')
     
     args = parser.parse_args()
     
@@ -489,7 +506,8 @@ def main():
             classification_method=args.classification_method,
             min_location_downloads=args.min_location_downloads,
             time_window=args.time_window,
-            sequence_length=args.sequence_length
+            sequence_length=args.sequence_length,
+            output_strategy=args.output_strategy
         )
         
         logger.info("\nDone!")

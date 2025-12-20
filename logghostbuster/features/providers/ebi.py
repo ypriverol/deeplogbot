@@ -340,30 +340,93 @@ class TimeWindowExtractor(BaseFeatureExtractor):
         window_df = conn.execute(window_query).df()
 
         if window_df.empty:
-            df['time_series_features'] = [[0.0] * 3] * len(df) # Assume 3 features in sequence
+            # Enhanced features: 3 base + 3 rate_of_change + 4 statistics + 1 trend + 1 volatility = 12 features
+            df['time_series_features'] = [[0.0] * 12] * len(df)
             return df
 
-        # Define features to keep in the sequence
-        features_to_keep = [
-            'downloads_in_window',
-            'unique_users_in_window',
-            'downloads_per_user_in_window'
-        ]
-
         def create_padded_sequence(group):
-            sorted_group = group.sort_values('window_start').tail(self.sequence_length)
+            sorted_group = group.sort_values('window_start').tail(self.sequence_length).copy()
             
-            # Calculate downloads_per_user_in_window in Pandas
+            # Base features
             sorted_group['downloads_per_user_in_window'] = sorted_group['downloads_in_window'] / sorted_group['unique_users_in_window'].replace(0, np.nan)
             sorted_group['downloads_per_user_in_window'] = sorted_group['downloads_per_user_in_window'].fillna(0.0)
             
-            # Extract only the feature columns as a NumPy array
+            # Enhanced features: Rate of change (percentage change from previous window)
+            sorted_group['dl_rate_change'] = sorted_group['downloads_in_window'].pct_change().fillna(0.0)
+            sorted_group['users_rate_change'] = sorted_group['unique_users_in_window'].pct_change().fillna(0.0)
+            sorted_group['dl_per_user_rate_change'] = sorted_group['downloads_per_user_in_window'].pct_change().fillna(0.0)
+            
+            # Windowed statistics (rolling window of 3 windows for min, max, std, median)
+            window_size = min(3, len(sorted_group))
+            if window_size > 1:
+                sorted_group['dl_rolling_min'] = sorted_group['downloads_in_window'].rolling(window=window_size, min_periods=1).min()
+                sorted_group['dl_rolling_max'] = sorted_group['downloads_in_window'].rolling(window=window_size, min_periods=1).max()
+                sorted_group['dl_rolling_std'] = sorted_group['downloads_in_window'].rolling(window=window_size, min_periods=1).std().fillna(0.0)
+                sorted_group['dl_rolling_median'] = sorted_group['downloads_in_window'].rolling(window=window_size, min_periods=1).median()
+            else:
+                sorted_group['dl_rolling_min'] = sorted_group['downloads_in_window']
+                sorted_group['dl_rolling_max'] = sorted_group['downloads_in_window']
+                sorted_group['dl_rolling_std'] = 0.0
+                sorted_group['dl_rolling_median'] = sorted_group['downloads_in_window']
+            
+            # Trend indicator: Linear regression slope over recent windows (last 3 windows)
+            trend_window = min(3, len(sorted_group))
+            slopes = []
+            for i in range(len(sorted_group)):
+                if i < trend_window - 1:
+                    slopes.append(0.0)
+                else:
+                    window_data = sorted_group.iloc[i-trend_window+1:i+1]['downloads_in_window'].values
+                    if len(window_data) > 1 and np.std(window_data) > 0:
+                        x = np.arange(len(window_data))
+                        slope = np.polyfit(x, window_data, 1)[0]
+                        slopes.append(slope)
+                    else:
+                        slopes.append(0.0)
+            sorted_group['trend_slope'] = slopes
+            
+            # Volatility: Coefficient of variation over recent windows (last 3 windows)
+            volatility_window = min(3, len(sorted_group))
+            volatilities = []
+            for i in range(len(sorted_group)):
+                if i < volatility_window - 1:
+                    volatilities.append(0.0)
+                else:
+                    window_data = sorted_group.iloc[i-volatility_window+1:i+1]['downloads_in_window'].values
+                    mean_val = np.mean(window_data)
+                    if mean_val > 0:
+                        cv = np.std(window_data) / mean_val
+                        volatilities.append(cv)
+                    else:
+                        volatilities.append(0.0)
+            sorted_group['volatility_cv'] = volatilities
+            
+            # Define all features to keep in the sequence (13 features total)
+            features_to_keep = [
+                # Base features (3)
+                'downloads_in_window',
+                'unique_users_in_window',
+                'downloads_per_user_in_window',
+                # Rate of change features (3)
+                'dl_rate_change',
+                'users_rate_change',
+                'dl_per_user_rate_change',
+                # Windowed statistics (4)
+                'dl_rolling_min',
+                'dl_rolling_max',
+                'dl_rolling_std',
+                'dl_rolling_median',
+                # Trend and volatility (2)
+                'trend_slope',
+                'volatility_cv'
+            ]
+            
+            # Extract feature columns as NumPy array
             sequence_values = sorted_group[features_to_keep].values
             
             # Pad with zeros if fewer than `sequence_length` windows
             if len(sequence_values) < self.sequence_length:
                 padding_needed = self.sequence_length - len(sequence_values)
-                # Use np.pad to add zeros to the beginning of the sequence
                 padded_sequence = np.pad(sequence_values, ((padding_needed, 0), (0, 0)), 'constant', constant_values=0.0)
             else:
                 padded_sequence = sequence_values
@@ -378,10 +441,12 @@ class TimeWindowExtractor(BaseFeatureExtractor):
         df['time_series_features'] = df['geo_location'].map(location_sequences)
         
         # Fill missing locations with default sequence (create new list for each to avoid reference issues)
+        # Enhanced features: 12 features total (3 base + 3 rate_of_change + 4 statistics + 1 trend + 1 volatility)
+        num_features = 12
         missing_locations_mask = df['time_series_features'].isna()
         if missing_locations_mask.any():
             df.loc[missing_locations_mask, 'time_series_features'] = [
-                [[0.0] * len(features_to_keep)] * self.sequence_length
+                [[0.0] * num_features] * self.sequence_length
                 for _ in range(missing_locations_mask.sum())
             ]
 

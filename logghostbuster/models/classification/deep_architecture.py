@@ -13,13 +13,379 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Tuple
 
 from ...utils import logger
 from ..isoforest.models import train_isolation_forest
+
+
+# =====================================================================
+# Constants for Bot Detection
+# =====================================================================
+
+# Bot label signal weights
+BOT_SIGNAL_WEIGHTS = {
+    'FEW_USERS_EXTREME_DL': 0.8,
+    'VERY_FEW_USERS_HIGH_DL': 0.6,
+    'MODERATE_USERS_HIGH_DL': 0.5,
+    'RULE_BOT': 0.5,
+    'RULE_HUB': 0.4,
+    'EXTREME_DL_ZSCORE': 0.4,
+    'HIGH_ANOMALY': 0.3,
+    'NON_WORKING_HIGH_ACTIVITY': 0.2,
+    'VERY_HIGH_ANOMALY': 0.2,
+    'VERY_EXTREME_DL_ZSCORE': 0.2,
+    'LOW_ENTROPY': 0.15,
+}
+
+# Bot detection thresholds
+BOT_THRESHOLDS = {
+    'FEW_USERS': 100,
+    'VERY_FEW_USERS': 50,
+    'EXTREME_DL_PER_USER': 50,
+    'HIGH_DL_PER_USER': 30,
+    'MODERATE_DL_PER_USER': 20,
+    'HIGH_ANOMALY_SCORE': 0.2,
+    'VERY_HIGH_ANOMALY_SCORE': 0.25,
+    'LOW_WORKING_HOURS_RATIO': 0.3,
+    'MIN_TOTAL_DOWNLOADS': 1000,
+    'EXTREME_ZSCORE': 3.0,
+    'VERY_EXTREME_ZSCORE': 4.0,
+    'ADAPTIVE_THRESHOLD_PERCENTILE': 85,
+    'FIXED_THRESHOLD': 0.5,
+    'LOW_ENTROPY_QUANTILE': 0.2,
+}
+
+# Override thresholds
+OVERRIDE_THRESHOLDS = {
+    'OVERRIDE1_DL_PER_USER': 50,
+    'OVERRIDE1_MAX_USERS': 100,
+    'OVERRIDE2_DL_PER_USER': 30,
+    'OVERRIDE2_MAX_USERS': 50,
+}
+
+# Feature weights for composite score
+COMPOSITE_SCORE_WEIGHTS = {
+    'DL_USER_PER_LOG_USERS': 0.3,
+    'USER_SCARCITY': 0.25,
+    'DOWNLOAD_CONCENTRATION': 0.25,
+    'ANOMALY_SCORE': 0.2,
+}
+
+# Focal loss parameters
+FOCAL_LOSS_ALPHA = 0.75
+FOCAL_LOSS_GAMMA = 2.0
+
+# Attention and model parameters
+ATTENTION_RESIDUAL_WEIGHT = 0.5
+ANOMALY_SCORE_OFFSET = 0.5
+LOG_USERS_OFFSET = 2
+EPSILON = 1e-10
+
+
+# =====================================================================
+# Phase 5 Improvements: Smart pseudo-labels and enhanced architecture
+# =====================================================================
+
+class FocalLoss(nn.Module):
+    """Focal Loss for addressing class imbalance in bot detection."""
+    def __init__(self, alpha: float = FOCAL_LOSS_ALPHA, gamma: float = FOCAL_LOSS_GAMMA):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        return focal_loss.mean()
+
+
+class EnhancedBotHead(nn.Module):
+    """Enhanced bot detection head with attention mechanism."""
+    def __init__(self, input_dim: int, hidden_dim: int = 256, dropout: float = 0.2):
+        super().__init__()
+        
+        # Self-attention for feature relationships
+        self.attention = nn.MultiheadAttention(
+            embed_dim=input_dim,
+            num_heads=4,
+            dropout=dropout * 0.5,
+            batch_first=True
+        )
+        
+        # Feature interaction layers
+        self.interaction_layer = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout * 0.5)
+        )
+        
+        # Gating mechanism
+        self.gate = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim // 2),
+            nn.Sigmoid()
+        )
+        
+        # Context layer
+        self.context_layer = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim // 4),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 4, hidden_dim // 2)
+        )
+        
+        # Final classifier
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(hidden_dim // 2, 2)  # Binary: bot or not
+        )
+        
+    def forward(self, x):
+        # Add sequence dimension for attention
+        x_seq = x.unsqueeze(1)
+        
+        # Self-attention
+        attn_out, _ = self.attention(x_seq, x_seq, x_seq)
+        attn_out = attn_out.squeeze(1)
+        
+        # Residual connection
+        combined = x + ATTENTION_RESIDUAL_WEIGHT * attn_out
+        
+        # Feature interaction with gating
+        interaction_out = self.interaction_layer(combined)
+        gate_out = self.gate(combined)
+        gated_features = interaction_out * gate_out
+        
+        # Context features
+        context_features = self.context_layer(x)
+        
+        # Combine features
+        final_features = torch.cat([gated_features, context_features], dim=1)
+        
+        # Final classification
+        return self.classifier(final_features)
+
+
+def _has_required_columns(df: pd.DataFrame, *columns: str) -> bool:
+    """Check if DataFrame has all required columns."""
+    return all(col in df.columns for col in columns)
+
+
+def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate intelligent bot labels based on multiple signals.
+    
+    Args:
+        df: DataFrame with location features
+        
+    Returns:
+        Tuple of (hard_labels, soft_labels) as numpy arrays
+    """
+    # Initialize bot score (0-1)
+    bot_score = np.zeros(len(df))
+    
+    # Signal 1: Few users + extreme DL/user (HIGHEST PRIORITY)
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        few_users_extreme_dl = (
+            (df['downloads_per_user'] > BOT_THRESHOLDS['EXTREME_DL_PER_USER']) & 
+            (df['unique_users'] < BOT_THRESHOLDS['FEW_USERS'])
+        )
+        bot_score[few_users_extreme_dl] += BOT_SIGNAL_WEIGHTS['FEW_USERS_EXTREME_DL']
+        
+        very_few_users_high_dl = (
+            (df['downloads_per_user'] > BOT_THRESHOLDS['HIGH_DL_PER_USER']) &
+            (df['downloads_per_user'] <= BOT_THRESHOLDS['EXTREME_DL_PER_USER']) &
+            (df['unique_users'] < BOT_THRESHOLDS['VERY_FEW_USERS'])
+        )
+        bot_score[very_few_users_high_dl] += BOT_SIGNAL_WEIGHTS['VERY_FEW_USERS_HIGH_DL']
+    
+    # Signal 2: Moderate users + high DL/user
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        moderate_users_high_dl = (
+            (df['downloads_per_user'] > BOT_THRESHOLDS['HIGH_DL_PER_USER']) & 
+            (df['unique_users'] >= BOT_THRESHOLDS['FEW_USERS']) &
+            (df['unique_users'] < 500)
+        )
+        bot_score[moderate_users_high_dl] += BOT_SIGNAL_WEIGHTS['MODERATE_USERS_HIGH_DL']
+    
+    # Signal 3: High anomaly score
+    if 'anomaly_score' in df.columns:
+        high_anomaly = df['anomaly_score'] > BOT_THRESHOLDS['HIGH_ANOMALY_SCORE']
+        very_high_anomaly = df['anomaly_score'] > BOT_THRESHOLDS['VERY_HIGH_ANOMALY_SCORE']
+        bot_score[high_anomaly] += BOT_SIGNAL_WEIGHTS['HIGH_ANOMALY']
+        bot_score[very_high_anomaly] += BOT_SIGNAL_WEIGHTS['VERY_HIGH_ANOMALY']
+    
+    # Signal 4: Original rule-based classification
+    if 'user_category' in df.columns:
+        rule_bot = df['user_category'] == 'bot'
+        rule_hub = df['user_category'] == 'download_hub'
+        bot_score[rule_bot] += BOT_SIGNAL_WEIGHTS['RULE_BOT']
+        bot_score[rule_hub] += BOT_SIGNAL_WEIGHTS['RULE_HUB']
+    
+    # Signal 5: Extreme DL/user (statistical outlier)
+    if 'downloads_per_user' in df.columns:
+        dl_user_values = df['downloads_per_user'].values
+        dl_user_median = np.median(dl_user_values)
+        dl_user_std = np.std(dl_user_values)
+        
+        if dl_user_std > EPSILON:
+            dl_user_zscore = (dl_user_values - dl_user_median) / dl_user_std
+            extreme_dl = dl_user_zscore > BOT_THRESHOLDS['EXTREME_ZSCORE']
+            very_extreme_dl = dl_user_zscore > BOT_THRESHOLDS['VERY_EXTREME_ZSCORE']
+            bot_score[extreme_dl] += BOT_SIGNAL_WEIGHTS['EXTREME_DL_ZSCORE']
+            bot_score[very_extreme_dl] += BOT_SIGNAL_WEIGHTS['VERY_EXTREME_DL_ZSCORE']
+    
+    # Signal 6: Low working hours ratio with high activity
+    if _has_required_columns(df, 'working_hours_ratio', 'total_downloads'):
+        non_working_high_activity = (
+            (df['working_hours_ratio'] < BOT_THRESHOLDS['LOW_WORKING_HOURS_RATIO']) &
+            (df['total_downloads'] > BOT_THRESHOLDS['MIN_TOTAL_DOWNLOADS'])
+        )
+        bot_score[non_working_high_activity] += BOT_SIGNAL_WEIGHTS['NON_WORKING_HIGH_ACTIVITY']
+    
+    # Signal 7: Low hourly entropy
+    if 'hourly_entropy' in df.columns:
+        low_entropy = df['hourly_entropy'] < df['hourly_entropy'].quantile(BOT_THRESHOLDS['LOW_ENTROPY_QUANTILE'])
+        bot_score[low_entropy] += BOT_SIGNAL_WEIGHTS['LOW_ENTROPY']
+    
+    # Normalize to [0, 1]
+    bot_score = np.clip(bot_score, 0, 1)
+    
+    # Create both soft and hard labels
+    soft_labels = bot_score
+    
+    # Adaptive threshold
+    percentile_threshold = np.percentile(bot_score, BOT_THRESHOLDS['ADAPTIVE_THRESHOLD_PERCENTILE'])
+    fixed_threshold = BOT_THRESHOLDS['FIXED_THRESHOLD']
+    threshold = min(percentile_threshold, fixed_threshold)
+    
+    hard_labels = (bot_score >= threshold).astype(float)
+    
+    logger.info(f"    Smart bot label statistics:")
+    logger.info(f"      - Locations with bot score > 0: {(bot_score > 0).sum()}")
+    logger.info(f"      - Locations with bot score > 0.5: {(bot_score > 0.5).sum()}")
+    logger.info(f"      - Threshold used: {threshold:.3f}")
+    logger.info(f"      - Hard bot labels: {hard_labels.sum()}")
+    
+    return hard_labels, soft_labels
+
+
+def add_bot_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add interaction features for better bot detection.
+    
+    Args:
+        df: DataFrame with location features
+        
+    Returns:
+        DataFrame with additional interaction features
+    """
+    # Core bot pattern: High DL/user with few users
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        df['dl_user_per_log_users'] = df['downloads_per_user'] / np.log(df['unique_users'] + LOG_USERS_OFFSET)
+        
+        df['user_scarcity_score'] = np.where(
+            df['downloads_per_user'] > BOT_THRESHOLDS['MODERATE_DL_PER_USER'],
+            np.exp(-df['unique_users'] / BOT_THRESHOLDS['FEW_USERS']),
+            0
+        )
+        
+        df['download_concentration'] = df['downloads_per_user'] * (1 / (df['unique_users'] + 1))
+    
+    # Anomaly-weighted features
+    if 'anomaly_score' in df.columns and 'downloads_per_user' in df.columns:
+        df['anomaly_dl_interaction'] = (df['anomaly_score'] + ANOMALY_SCORE_OFFSET).clip(0, 1) * df['downloads_per_user']
+    
+    # Temporal features
+    if 'hourly_entropy' in df.columns and 'downloads_per_user' in df.columns:
+        df['temporal_irregularity'] = (1 / (df['hourly_entropy'] + 0.1)) * np.log(df['downloads_per_user'] + 1)
+    
+    # Composite bot score
+    score_components = []
+    weights = []
+    
+    if 'dl_user_per_log_users' in df.columns:
+        max_val = df['dl_user_per_log_users'].quantile(0.95)
+        if max_val > EPSILON:
+            score_components.append(np.clip(df['dl_user_per_log_users'] / max_val, 0, 1))
+            weights.append(COMPOSITE_SCORE_WEIGHTS['DL_USER_PER_LOG_USERS'])
+    
+    if 'user_scarcity_score' in df.columns:
+        score_components.append(df['user_scarcity_score'])
+        weights.append(COMPOSITE_SCORE_WEIGHTS['USER_SCARCITY'])
+    
+    if 'download_concentration' in df.columns:
+        max_val = df['download_concentration'].quantile(0.95)
+        if max_val > EPSILON:
+            score_components.append(np.clip(df['download_concentration'] / max_val, 0, 1))
+            weights.append(COMPOSITE_SCORE_WEIGHTS['DOWNLOAD_CONCENTRATION'])
+    
+    if 'anomaly_score' in df.columns:
+        score_components.append((df['anomaly_score'] + ANOMALY_SCORE_OFFSET).clip(0, 1))
+        weights.append(COMPOSITE_SCORE_WEIGHTS['ANOMALY_SCORE'])
+    
+    if score_components:
+        weights = np.array(weights) / np.sum(weights)
+        df['bot_composite_score'] = sum(w * s for w, s in zip(weights, score_components))
+    
+    return df
+
+
+def apply_bot_detection_override(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply post-processing overrides for obvious bot patterns."""
+    
+    override_count = 0
+    
+    # Override 1: Few users with extreme DL/user
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        obvious_bots = (
+            (df['downloads_per_user'] > OVERRIDE_THRESHOLDS['OVERRIDE1_DL_PER_USER']) & 
+            (df['unique_users'] < OVERRIDE_THRESHOLDS['OVERRIDE1_MAX_USERS'])
+        )
+        
+        if 'is_bot_neural' in df.columns:
+            obvious_bots = obvious_bots & (df['is_bot_neural'] == False)
+        
+        if obvious_bots.any():
+            logger.info(f"    Applying bot override for {obvious_bots.sum()} obvious patterns "
+                       f"(>{OVERRIDE_THRESHOLDS['OVERRIDE1_DL_PER_USER']} DL/user, "
+                       f"<{OVERRIDE_THRESHOLDS['OVERRIDE1_MAX_USERS']} users)")
+            df.loc[obvious_bots, 'is_bot_neural'] = True
+            if 'user_category' in df.columns:
+                df.loc[obvious_bots, 'user_category'] = 'bot'
+            override_count += obvious_bots.sum()
+    
+    # Override 2: Very few users with high DL/user
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        very_obvious_bots = (
+            (df['downloads_per_user'] > OVERRIDE_THRESHOLDS['OVERRIDE2_DL_PER_USER']) &
+            (df['unique_users'] < OVERRIDE_THRESHOLDS['OVERRIDE2_MAX_USERS'])
+        )
+        
+        if 'is_bot_neural' in df.columns:
+            very_obvious_bots = very_obvious_bots & (df['is_bot_neural'] == False)
+        
+        if very_obvious_bots.any():
+            logger.info(f"    Applying bot override for {very_obvious_bots.sum()} very obvious patterns "
+                      f"(>{OVERRIDE_THRESHOLDS['OVERRIDE2_DL_PER_USER']} DL/user, "
+                      f"<{OVERRIDE_THRESHOLDS['OVERRIDE2_MAX_USERS']} users)")
+            df.loc[very_obvious_bots, 'is_bot_neural'] = True
+            if 'user_category' in df.columns:
+                df.loc[very_obvious_bots, 'user_category'] = 'bot'
+            override_count += very_obvious_bots.sum()
+    
+    logger.info(f"    Total bot overrides applied: {override_count}")
+    
+    return df
 
 
 class TransformerClassifier(nn.Module):
@@ -27,7 +393,7 @@ class TransformerClassifier(nn.Module):
     
     def __init__(self, ts_input_dim: int, fixed_input_dim: int, d_model: int = 128, 
                  nhead: int = 8, num_layers: int = 3, dim_feedforward: int = 512,
-                 num_classes: int = 5, enable_reconstruction: bool = False):
+                 num_classes: int = 5, enable_reconstruction: bool = False, enable_bot_head: bool = False):
         """
         Args:
             ts_input_dim: Dimension of time-series features per window
@@ -76,9 +442,15 @@ class TransformerClassifier(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(dim_feedforward // 2, num_classes)
         )
+
+        # Optional: Binary classification head for 'is_bot' prediction
+        self.enable_bot_head = enable_bot_head
+        if enable_bot_head:
+            # Enhanced bot head with attention mechanism
+            self.bot_head = EnhancedBotHead(combined_dim, hidden_dim=dim_feedforward // 2)
     
     def forward(self, ts_features: torch.Tensor, fixed_features: torch.Tensor, 
-                mask_indices: Optional[torch.Tensor] = None, return_reconstruction: bool = False) -> torch.Tensor:
+                mask_indices: Optional[torch.Tensor] = None, return_reconstruction: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Forward pass combining time-series and fixed features.
         
@@ -89,7 +461,7 @@ class TransformerClassifier(nn.Module):
             return_reconstruction: Whether to return reconstruction for masked steps
         
         Returns:
-            Classification logits [batch_size, num_classes] or tuple (logits, reconstruction) if return_reconstruction
+            Tuple of (classification_logits [batch_size, num_classes], bot_logits [batch_size, 2] or None, reconstruction [batch_size, seq_len, ts_input_dim] or None)
         """
         # Encode time-series features
         ts_proj = self.ts_input_projection(ts_features)
@@ -107,9 +479,15 @@ class TransformerClassifier(nn.Module):
         if return_reconstruction and self.enable_reconstruction and mask_indices is not None:
             # Reconstruct masked time steps
             reconstruction = self.reconstruction_head(ts_encoded)  # [batch_size, seq_len, ts_input_dim]
-            return logits, reconstruction
         else:
-            return logits
+            reconstruction = None
+
+        if self.enable_bot_head:
+            bot_logits = self.bot_head(combined) # [batch_size, 2]
+        else:
+            bot_logits = None
+        
+        return logits, bot_logits, reconstruction
 
 
 class TimeSeriesDataset(Dataset):
@@ -218,7 +596,7 @@ def train_self_supervised(
             optimizer.zero_grad()
             
             # Forward pass with reconstruction
-            _, reconstruction = classifier(
+            _, _, reconstruction = classifier(
                 ts_batch, fixed_batch, 
                 mask_indices=mask_batch, 
                 return_reconstruction=True
@@ -244,7 +622,7 @@ def train_self_supervised(
                 fixed_batch = fixed_batch.to(device)
                 mask_batch = mask_batch.to(device)
                 
-                _, reconstruction = classifier(
+                _, _, reconstruction = classifier(
                     ts_batch, fixed_batch,
                     mask_indices=mask_batch,
                     return_reconstruction=True
@@ -289,8 +667,10 @@ def train_supervised_classifier(
     epochs: int = 30,
     batch_size: int = 256,
     learning_rate: float = 1e-4,
-    validation_split: float = 0.1,
-    class_weights: Optional[torch.Tensor] = None
+                 validation_split: float = 0.1,
+                 class_weights: Optional[torch.Tensor] = None,
+                 y_is_bot: Optional[torch.Tensor] = None,
+                 lambda_bot_loss: float = 0.5
 ) -> TransformerClassifier:
     """
     Supervised fine-tuning of the classifier using rule-based labels.
@@ -322,26 +702,37 @@ def train_supervised_classifier(
     X_ts_train = X_ts[train_indices]
     X_fixed_train = X_fixed[train_indices]
     y_train = y_labels[train_indices]
+    y_is_bot_train = y_is_bot[train_indices] if y_is_bot is not None else None
     X_ts_val = X_ts[val_indices]
     X_fixed_val = X_fixed[val_indices]
     y_val = y_labels[val_indices]
+    y_is_bot_val = y_is_bot[val_indices] if y_is_bot is not None else None
     
     # Create datasets
-    train_dataset = torch.utils.data.TensorDataset(X_ts_train, X_fixed_train, y_train)
-    val_dataset = torch.utils.data.TensorDataset(X_ts_val, X_fixed_val, y_val)
+    if y_is_bot_train is not None:
+        train_dataset = torch.utils.data.TensorDataset(X_ts_train, X_fixed_train, y_train, y_is_bot_train)
+        val_dataset = torch.utils.data.TensorDataset(X_ts_val, X_fixed_val, y_val, y_is_bot_val)
+    else:
+        train_dataset = torch.utils.data.TensorDataset(X_ts_train, X_fixed_train, y_train)
+        val_dataset = torch.utils.data.TensorDataset(X_ts_val, X_fixed_val, y_val)
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
     # Loss function with class weights
     if class_weights is None:
-        criterion = nn.CrossEntropyLoss()
+        criterion_classification = nn.CrossEntropyLoss()
     else:
-        criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
+        criterion_classification = nn.CrossEntropyLoss(weight=class_weights.to(device))
+    
+    # Focal loss for bot head to handle class imbalance
+    if y_is_bot is not None:
+        criterion_bot = FocalLoss(alpha=FOCAL_LOSS_ALPHA, gamma=FOCAL_LOSS_GAMMA)  # Focal loss for better bot detection
     
     optimizer = optim.Adam(classifier.parameters(), lr=learning_rate)
     
     best_val_acc = 0.0
+    best_val_bot_f1 = 0.0 # Track F1 for bot head
     patience = 5
     patience_counter = 0
     
@@ -350,20 +741,40 @@ def train_supervised_classifier(
         train_loss = 0.0
         train_correct = 0
         train_total = 0
+        train_bot_correct = 0
+        train_bot_total = 0
         
-        for ts_batch, fixed_batch, y_batch in train_loader:
+        for batch_data in train_loader:
+            if y_is_bot_train is not None:
+                ts_batch, fixed_batch, y_batch, y_is_bot_batch = batch_data
+                y_is_bot_batch = y_is_bot_batch.to(device)
+            else:
+                ts_batch, fixed_batch, y_batch = batch_data
+                y_is_bot_batch = None
+            
             ts_batch = ts_batch.to(device)
             fixed_batch = fixed_batch.to(device)
             y_batch = y_batch.to(device)
             
             optimizer.zero_grad()
-            logits = classifier(ts_batch, fixed_batch)
-            loss = criterion(logits, y_batch)
-            loss.backward()
+            classification_logits, bot_logits, _ = classifier(ts_batch, fixed_batch)
+            
+            loss_classification = criterion_classification(classification_logits, y_batch)
+            total_loss = loss_classification
+
+            if y_is_bot_batch is not None and bot_logits is not None:
+                loss_bot = criterion_bot(bot_logits, y_is_bot_batch)
+                total_loss += lambda_bot_loss * loss_bot
+                
+                _, predicted_bot = torch.max(bot_logits.data, 1)
+                train_bot_total += y_is_bot_batch.size(0)
+                train_bot_correct += (predicted_bot == y_is_bot_batch).sum().item()
+
+            total_loss.backward()
             optimizer.step()
             
-            train_loss += loss.item()
-            _, predicted = torch.max(logits.data, 1)
+            train_loss += total_loss.item()
+            _, predicted = torch.max(classification_logits.data, 1)
             train_total += y_batch.size(0)
             train_correct += (predicted == y_batch).sum().item()
         
@@ -372,17 +783,42 @@ def train_supervised_classifier(
         val_loss = 0.0
         val_correct = 0
         val_total = 0
+        val_bot_correct = 0
+        val_bot_total = 0
+        val_bot_predictions = []
+        val_bot_targets = []
+
         with torch.no_grad():
-            for ts_batch, fixed_batch, y_batch in val_loader:
+            for batch_data_val in val_loader:
+                if y_is_bot_val is not None:
+                    ts_batch, fixed_batch, y_batch, y_is_bot_batch = batch_data_val
+                    y_is_bot_batch = y_is_bot_batch.to(device)
+                else:
+                    ts_batch, fixed_batch, y_batch = batch_data_val
+                    y_is_bot_batch = None
+
                 ts_batch = ts_batch.to(device)
                 fixed_batch = fixed_batch.to(device)
                 y_batch = y_batch.to(device)
                 
-                logits = classifier(ts_batch, fixed_batch)
-                loss = criterion(logits, y_batch)
-                val_loss += loss.item()
+                classification_logits, bot_logits, _ = classifier(ts_batch, fixed_batch)
                 
-                _, predicted = torch.max(logits.data, 1)
+                loss_classification = criterion_classification(classification_logits, y_batch)
+                total_loss = loss_classification
+
+                if y_is_bot_batch is not None and bot_logits is not None:
+                    loss_bot = criterion_bot(bot_logits, y_is_bot_batch)
+                    total_loss += lambda_bot_loss * loss_bot
+
+                    _, predicted_bot = torch.max(bot_logits.data, 1)
+                    val_bot_total += y_is_bot_batch.size(0)
+                    val_bot_correct += (predicted_bot == y_is_bot_batch).sum().item()
+                    val_bot_predictions.extend(predicted_bot.cpu().numpy())
+                    val_bot_targets.extend(y_is_bot_batch.cpu().numpy())
+
+                val_loss += total_loss.item()
+                
+                _, predicted = torch.max(classification_logits.data, 1)
                 val_total += y_batch.size(0)
                 val_correct += (predicted == y_batch).sum().item()
         
@@ -391,12 +827,22 @@ def train_supervised_classifier(
         avg_train_loss = train_loss / len(train_loader) if len(train_loader) > 0 else 0.0
         avg_val_loss = val_loss / len(val_loader) if len(val_loader) > 0 else 0.0
         
+        train_bot_acc = train_bot_correct / train_bot_total if train_bot_total > 0 else 0.0
+        val_bot_acc = val_bot_correct / val_bot_total if val_bot_total > 0 else 0.0
+
+        # Calculate F1-score for bot head
+        val_bot_f1 = 0.0
+        if y_is_bot_val is not None and len(val_bot_targets) > 0:
+            from sklearn.metrics import f1_score
+            val_bot_f1 = f1_score(val_bot_targets, val_bot_predictions, average='binary', pos_label=1)
+
         if (epoch + 1) % 5 == 0:
-            logger.info(f"      Epoch {epoch+1}/{epochs}: Train Loss={avg_train_loss:.6f}, Train Acc={train_acc:.4f}, Val Loss={avg_val_loss:.6f}, Val Acc={val_acc:.4f}")
+            logger.info(f"      Epoch {epoch+1}/{epochs}: Train Loss={avg_train_loss:.6f}, Train Acc={train_acc:.4f} (Bot Acc={train_bot_acc:.4f}), Val Loss={avg_val_loss:.6f}, Val Acc={val_acc:.4f} (Bot Acc={val_bot_acc:.4f}, Bot F1={val_bot_f1:.4f})")
         
-        # Early stopping
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        # Early stopping based on overall validation accuracy OR bot F1
+        if val_acc > best_val_acc or val_bot_f1 > best_val_bot_f1: # Prioritize bot F1 if it's better
+            best_val_acc = max(val_acc, best_val_acc)
+            best_val_bot_f1 = max(val_bot_f1, best_val_bot_f1)
             patience_counter = 0
         else:
             patience_counter += 1
@@ -404,7 +850,7 @@ def train_supervised_classifier(
                 logger.info(f"      Early stopping at epoch {epoch+1}")
                 break
     
-    logger.info(f"    Supervised fine-tuning completed. Best validation accuracy: {best_val_acc:.4f}")
+    logger.info(f"    Supervised fine-tuning completed. Best validation accuracy: {best_val_acc:.4f}, Best Bot F1: {best_val_bot_f1:.4f}")
     return classifier
 
 
@@ -416,7 +862,9 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                               pretrain_learning_rate: float = 1e-4,
                               enable_neural_classification: bool = True,
                               finetune_epochs: int = 30, finetune_batch_size: int = 256,
-                              finetune_learning_rate: float = 1e-4) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                              finetune_learning_rate: float = 1e-4,
+                              enable_bot_head: bool = True,
+                              lambda_bot_loss: float = 0.5) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Classify locations using deep architecture: Isolation Forest + Transformers.
     
@@ -466,6 +914,18 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     df['anomaly_score'] = -scores
     logger.info(f"    Detected {df['is_anomaly'].sum():,} anomalous locations")
     
+    # Add interaction features for better bot detection
+    logger.info("  Adding bot interaction features...")
+    df = add_bot_interaction_features(df)
+    
+    # Add new features to feature columns if they exist
+    new_features = ['dl_user_per_log_users', 'user_scarcity_score', 
+                   'download_concentration', 'bot_composite_score',
+                   'anomaly_dl_interaction', 'temporal_irregularity']
+    for feat in new_features:
+        if feat in df.columns and feat not in feature_columns:
+            feature_columns.append(feat)
+    
     # Prepare features for Transformer
     # Use time_series_features if available, otherwise fallback to flat features
     if 'time_series_features' in df.columns and df['time_series_features'].apply(lambda x: isinstance(x, list) and len(x) > 0).any():
@@ -477,29 +937,36 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             logger.warning(f"  Max sequence length found ({max_seq_len}) is less than requested ({sequence_length}). Padding with zeros.")
         
         # Determine num_features_per_window from the first valid entry
-        first_valid_ts = df['time_series_features'].dropna().iloc[0]
-        num_features_per_window = len(first_valid_ts[0]) if len(first_valid_ts) > 0 else 0
-
-        if num_features_per_window == 0:
-            logger.warning("  No features found in time_series_features. Falling back to flat features.")
+        valid_ts = df['time_series_features'].dropna()
+        if len(valid_ts) == 0:
+            logger.warning("  No valid time-series features found. Falling back to flat features.")
             X_ts = df[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns))
             sequence_length = 1
             num_features_per_window = len(feature_columns)
         else:
-            X_ts_list = []
-            for ts_list in df['time_series_features']:
-                if isinstance(ts_list, list):
-                    # Pad or truncate to desired sequence_length
-                    if len(ts_list) < sequence_length:
-                        padded_ts = [[0.0] * num_features_per_window] * (sequence_length - len(ts_list)) + ts_list
-                    elif len(ts_list) > sequence_length:
-                        padded_ts = ts_list[-sequence_length:]
+            first_valid_ts = valid_ts.iloc[0]
+            num_features_per_window = len(first_valid_ts[0]) if len(first_valid_ts) > 0 else 0
+
+            if num_features_per_window == 0:
+                logger.warning("  No features found in time_series_features. Falling back to flat features.")
+                X_ts = df[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns))
+                sequence_length = 1
+                num_features_per_window = len(feature_columns)
+            else:
+                X_ts_list = []
+                for ts_list in df['time_series_features']:
+                    if isinstance(ts_list, list):
+                        # Pad or truncate to desired sequence_length
+                        if len(ts_list) < sequence_length:
+                            padded_ts = [[0.0] * num_features_per_window] * (sequence_length - len(ts_list)) + ts_list
+                        elif len(ts_list) > sequence_length:
+                            padded_ts = ts_list[-sequence_length:]
+                        else:
+                            padded_ts = ts_list
+                        X_ts_list.append(padded_ts)
                     else:
-                        padded_ts = ts_list
-                    X_ts_list.append(padded_ts)
-                else:
-                    X_ts_list.append([[0.0] * num_features_per_window] * sequence_length)
-            X_ts = np.array(X_ts_list)
+                        X_ts_list.append([[0.0] * num_features_per_window] * sequence_length)
+                X_ts = np.array(X_ts_list)
     else:
         logger.info("  Time-series features not available or empty, falling back to flat features.")
         X_ts = df[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns)) # Reshape flat features as sequence length 1
@@ -507,8 +974,8 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         num_features_per_window = len(feature_columns)
 
     # Step 2: Transformer-based feature encoding (no clustering)
-    transformer_embeddings = None
     neural_predictions = None
+    bot_predictions = None
     if use_transformer:
         logger.info("  Step 2/2: Encoding features with Transformer...")
         try:
@@ -538,7 +1005,8 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 d_model=128,
                 nhead=8,
                 num_layers=3,
-                enable_reconstruction=enable_self_supervised
+                enable_reconstruction=enable_self_supervised,
+                enable_bot_head=enable_bot_head
             ).to(device)
             
             X_tensor = X_tensor.to(device)
@@ -560,8 +1028,15 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 )
             
             # Generate rule-based labels for training (pseudo-labels)
-            logger.info("    Generating rule-based labels for training...")
+            logger.info("    Generating rule-based labels for classification training...")
             rule_labels = _generate_rule_based_labels(df)
+
+            # Generate SMART bot labels for multi-task learning
+            logger.info("    Generating smart 'is_bot' labels for multi-task training...")
+            # Use smart labels that capture nuanced bot patterns
+            hard_bot_labels, _ = generate_smart_bot_labels(df)
+            is_bot_labels = hard_bot_labels  # Use hard labels for training
+
             
             # Supervised fine-tuning (if enabled)
             if enable_neural_classification:
@@ -571,6 +1046,7 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 
                 # Convert labels to tensor
                 y_labels = torch.LongTensor(rule_labels).to(device)
+                y_is_bot_labels = torch.LongTensor(is_bot_labels).to(device)
                 
                 # Calculate class weights for imbalanced data
                 unique_labels, counts = np.unique(rule_labels, return_counts=True)
@@ -589,7 +1065,9 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                     epochs=finetune_epochs,
                     batch_size=finetune_batch_size,
                     learning_rate=finetune_learning_rate,
-                    class_weights=class_weights
+                    class_weights=class_weights,
+                    y_is_bot=y_is_bot_labels,
+                    lambda_bot_loss=lambda_bot_loss
                 )
             
             # Forward pass to get predictions
@@ -597,17 +1075,24 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             with torch.no_grad():
                 if enable_neural_classification:
                     # Get neural predictions
-                    logits = classifier(X_tensor, X_fixed_tensor)
+                    logits, bot_logits, _ = classifier(X_tensor, X_fixed_tensor)
                     _, predicted_classes = torch.max(logits, 1)
                     neural_predictions = predicted_classes.cpu().numpy()
+                    if enable_bot_head:
+                        _, predicted_bot_classes = torch.max(bot_logits, 1)
+                        bot_predictions = predicted_bot_classes.cpu().numpy()
+                    else:
+                        bot_predictions = None
                 else:
                     # Extract embeddings for rule-based classification
                     ts_proj = classifier.ts_input_projection(X_tensor)
                     ts_encoded = classifier.transformer(ts_proj)
                     ts_pooled = ts_encoded.mean(dim=1).cpu().numpy()
                     fixed_proj = classifier.fixed_projection(X_fixed_tensor).cpu().numpy()
-                    transformer_embeddings = np.concatenate([ts_pooled, fixed_proj], axis=1)
+                    # Embeddings available if needed for future use
+                    # transformer_embeddings = np.concatenate([ts_pooled, fixed_proj], axis=1)
                     neural_predictions = None
+                    bot_predictions = None # No bot predictions if not neural classification
             
             logger.info(f"    Transformer processing completed")
             
@@ -615,6 +1100,7 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             logger.warning(f"    Transformer encoding failed ({e}), using original features for classification")
             use_transformer = False
             neural_predictions = None
+            bot_predictions = None
     
     # Create empty cluster_df for compatibility (no clustering anymore)
     cluster_df = pd.DataFrame()
@@ -641,6 +1127,12 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         # Map neural predictions to categories
         category_map = {0: 'bot', 1: 'download_hub', 2: 'independent_user', 3: 'normal', 4: 'other'}
         df['user_category'] = [category_map[pred] for pred in neural_predictions]
+        if enable_bot_head and bot_predictions is not None:
+            df['is_bot_neural'] = bot_predictions == 1 # Add a new column for the explicit bot prediction
+            
+        # Apply post-processing overrides for obvious bot patterns
+        logger.info("    Applying post-processing bot detection overrides...")
+        df = apply_bot_detection_override(df)
     else:
         logger.info("    Using rule-based classification...")
         # Fallback to rule-based classification
