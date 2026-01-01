@@ -58,15 +58,17 @@ def annotate_downloads(conn, input_parquet, output_parquet,
     if output_strategy == 'new_file':
         # Create new file with _annotated suffix, or use provided output_parquet if specified
         if output_parquet is None:
-            # Auto-generate filename with _annotated suffix
-            input_dir = os.path.dirname(input_parquet)
+            # Auto-generate filename with _annotated suffix in the output_dir (writable location)
             input_basename = os.path.basename(input_parquet)
             input_name, input_ext = os.path.splitext(input_basename)
             new_filename = f"{input_name}_annotated{input_ext}"
-            output_parquet = os.path.join(input_dir, new_filename)
+            output_parquet = os.path.join(output_dir, new_filename)
             logger.info(f"  Creating new annotated file (auto-generated): {output_parquet}")
         else:
-            # Use provided output filename
+            # Use provided output filename (ensure directory exists)
+            output_parquet_dir = os.path.dirname(output_parquet)
+            if output_parquet_dir and not os.path.exists(output_parquet_dir):
+                os.makedirs(output_parquet_dir, exist_ok=True)
             logger.info(f"  Creating new annotated file (user-specified): {output_parquet}")
     elif output_strategy == 'overwrite':
         # Use the provided output_parquet (or input_parquet if None)
@@ -74,6 +76,12 @@ def annotate_downloads(conn, input_parquet, output_parquet,
             output_parquet = input_parquet
         logger.info(f"  Overwriting original file: {output_parquet}")
         logger.warning("  Note: This may fail if the file is locked by another process")
+    
+    # Ensure output directory exists
+    output_parquet_dir = os.path.dirname(os.path.abspath(output_parquet))
+    if output_parquet_dir and not os.path.exists(output_parquet_dir):
+        os.makedirs(output_parquet_dir, exist_ok=True)
+        logger.info(f"  Created output directory: {output_parquet_dir}")
     
     escaped_output = os.path.abspath(output_parquet).replace("'", "''")
     

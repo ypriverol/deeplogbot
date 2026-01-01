@@ -311,24 +311,37 @@ def run_bot_annotator(
                 logger.info(f"  {row['country']:<15} {city:<20} {int(row['unique_users']):>10,} users, "
                            f"{row['downloads_per_user']:.1f} DL/user, {int(row['total_downloads']):>6,} total DL")
         
-        # Decide whether we should annotate in this run.
+        # Decide whether we should run annotation/reporting in this run.
         # IMPORTANT: When sampling is enabled, we must NOT annotate the original
         # parquet with the sampled subset, so we automatically disable annotation.
+        # However, reports_only strategy can still run (it won't write parquet files).
+        # Always run if reports_only is requested (even if annotate=False), as it only generates reports.
         effective_annotate = annotate and (sample_size is None)
+        should_run_annotation = effective_annotate or output_strategy == 'reports_only'
+        
         if annotate and sample_size is not None:
-            logger.info(
-                "Sampling is enabled (sample_size != None); skipping annotation to avoid "
-                "overwriting the full input parquet with a sampled subset. "
-                "To annotate the full dataset, rerun without --sample-size."
-            )
+            if output_strategy == 'reports_only':
+                logger.info(
+                    "Sampling is enabled, but reports_only strategy will still generate reports "
+                    "(no parquet files will be written)."
+                )
+            else:
+                logger.info(
+                    "Sampling is enabled (sample_size != None); skipping annotation to avoid "
+                    "overwriting the full input parquet with a sampled subset. "
+                    "To annotate the full dataset, rerun without --sample-size."
+                )
 
-        # Step 4: Annotate downloads (optional)
+        # Step 4: Annotate downloads or generate reports (optional)
         logger.info("\n" + "=" * 70)
-        logger.info("Step 4: Annotating downloads")
+        if output_strategy == 'reports_only':
+            logger.info("Step 4: Generating reports (no parquet annotation)")
+        else:
+            logger.info("Step 4: Annotating downloads")
         logger.info("=" * 70)
         
         annotated_file = None
-        if effective_annotate:
+        if should_run_annotation:
             # Handle output strategy
             # For overwrite strategy, default to input file if no output specified
             # For new_file strategy, output_parquet can be None (auto-generate) or specified by user
@@ -339,7 +352,7 @@ def run_bot_annotator(
                                                 bot_locs, hub_locs, output_dir,
                                                 output_strategy=output_strategy)
         else:
-            logger.info("Annotation skipped (annotate=False).")
+            logger.info("Annotation skipped (annotate=False and output_strategy != 'reports_only').")
         
         # Step 5: Calculate statistics
         logger.info("\n" + "=" * 70)
@@ -461,6 +474,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='Annotate downloads with bot and download_hub flags using ML detection'
     )
+    logger.debug("Starting main CLI function...")
     parser.add_argument('--input', '-i', 
                        default='original_data/data_downloads_parquet.parquet',
                        help='Input parquet file')
@@ -492,8 +506,14 @@ def main():
     parser.add_argument('--output-strategy', type=str, default='new_file',
                        choices=['new_file', 'reports_only', 'overwrite'],
                        help='Output file strategy: "new_file" creates annotated file with _annotated suffix (default), "reports_only" only generates reports, "overwrite" rewrites original file')
+    parser.add_argument('--reports-only', action='store_true',
+                       help='Shortcut flag: Only generate reports, skip parquet annotation (equivalent to --output-strategy reports_only)')
     
     args = parser.parse_args()
+    
+    # If --reports-only is set, override output_strategy
+    if args.reports_only:
+        args.output_strategy = 'reports_only'
     
     try:
         run_bot_annotator(

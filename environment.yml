@@ -4,10 +4,11 @@ channels:
   - conda-forge
 dependencies:
   - python=3.9
-  - pandas
+  - pandas<2.0
   - "numpy<2.0"
+  - "scipy=1.11.4"
   - scikit-learn
-  - pyyaml # Added pyyaml dependency
+  - pyyaml
   - pytorch=1.13.1
   - cpuonly
   - duckdb
