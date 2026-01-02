@@ -353,8 +353,9 @@ class ReportGenerator:
             standard_features = list(self.feature_descriptions.keys())
             available_features = self._get_available_features(df, standard_features)
         
-        # Get city field name from schema or use default
-        city_field = self.schema.city_field if self.schema and self.schema.city_field else 'city'
+        # The city column is always named 'city' in the analysis DataFrame
+        # (aliased in extract_location_features), regardless of the original schema field name
+        city_field = 'city'
         
         with open(report_file, 'w') as f:
             f.write("=" * 80 + "\n")
