@@ -176,6 +176,10 @@ def run_bot_annotator(
         logger.info(f"Minimum location downloads threshold: {schema.min_location_downloads} (from schema)")
     
     conn = duckdb.connect()
+    # Configure memory limits to prevent OOM issues
+    conn.execute("SET memory_limit='4GB'")
+    conn.execute("SET max_memory='4GB'")
+    conn.execute("SET threads=2")  # Limit parallelism to reduce memory pressure
     conn.execute("SET threads=1")  # Single thread for stability
     conn.execute("SET preserve_insertion_order=false")
     

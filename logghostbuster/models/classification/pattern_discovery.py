@@ -145,16 +145,30 @@ def extract_behavioral_features(df: pd.DataFrame, input_parquet: str, conn) -> p
     # Feature 1: Temporal regularity (how mechanical are the download times?)
     logger.info("  Extracting temporal regularity features...")
     
+    # Simplified query to reduce memory usage - sample instead of using all intervals
     temporal_query = f"""
-    WITH download_intervals AS (
+    WITH sampled_downloads AS (
         SELECT 
             {schema.location_field} as geo_location,
-            EPOCH(CAST({schema.timestamp_field} AS TIMESTAMP) - 
-                  LAG(CAST({schema.timestamp_field} AS TIMESTAMP)) 
-                  OVER (PARTITION BY {schema.location_field} ORDER BY {schema.timestamp_field})) as interval_seconds
+            {schema.timestamp_field} as download_time,
+            ROW_NUMBER() OVER (PARTITION BY {schema.location_field} ORDER BY RANDOM()) as rn
         FROM read_parquet('{escaped_path}')
         WHERE {schema.location_field} IS NOT NULL
         AND {schema.timestamp_field} IS NOT NULL
+    ),
+    limited_downloads AS (
+        -- Sample up to 100 downloads per location to reduce memory
+        SELECT geo_location, download_time 
+        FROM sampled_downloads 
+        WHERE rn <= 100
+    ),
+    download_intervals AS (
+        SELECT 
+            geo_location,
+            EPOCH(CAST(download_time AS TIMESTAMP) - 
+                  LAG(CAST(download_time AS TIMESTAMP)) 
+                  OVER (PARTITION BY geo_location ORDER BY download_time)) as interval_seconds
+        FROM limited_downloads
     )
     SELECT 
         geo_location,
