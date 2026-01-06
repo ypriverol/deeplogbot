@@ -7,6 +7,57 @@ This module implements a multi-stage architecture:
 The Transformer processes time-series features and combines them with fixed features
 to directly classify locations into categories (BOT, DOWNLOAD_HUB, NORMAL, INDEPENDENT_USER, OTHER).
 This approach is similar to the paper's architecture without clustering.
+
+ENHANCEMENTS FOR DISCOVERING NEW BOT PATTERNS:
+===============================================
+
+The original approach was limited by circular dependency on rule-based labels.
+This module now includes 7 key enhancements to discover bots beyond existing rules:
+
+1. **Anomaly-Based Label Generation** (generate_anomaly_based_labels):
+   - Uses HDBSCAN clustering on Isolation Forest anomalies
+   - Discovers natural groupings based on behavioral patterns
+   - Eliminates dependency on hard-coded thresholds
+
+2. **Contrastive Learning** (ContrastiveTransformerEncoder):
+   - Learns representations where similar patterns cluster together
+   - Uses NT-Xent contrastive loss with data augmentation
+   - Discovers patterns WITHOUT explicit labels
+
+3. **Pseudo-Label Refinement** (iterative_pseudo_label_refinement):
+   - Starts with rule-based labels as noisy pseudo-labels
+   - Iteratively refines predictions using model confidence
+   - Allows model to override low-confidence rule predictions
+
+4. **Temporal Anomaly Detection** (TemporalAnomalyDetector):
+   - Bidirectional LSTM with attention for temporal patterns
+   - Detects bot-specific signatures:
+     * Regular/periodic access patterns
+     * Sudden bursts followed by silence
+     * Non-human access timing (3 AM spikes)
+
+5. **Ensemble-Based Discovery** (ensemble_bot_discovery):
+   - Combines Isolation Forest, LOF, and One-Class SVM
+   - Focuses on cases where 2+ methods agree
+   - Discovers anomalies that rules miss
+
+6. **Bot Signature Features** (add_bot_signature_features):
+   - Adds 7 discriminative features:
+     * access_regularity: Std dev of hourly distribution
+     * ua_per_user: User-Agent diversity per user
+     * request_velocity: Downloads per active hour
+     * ip_concentration: 1 - IP entropy
+     * session_anomaly: Deviation from median session length
+     * request_pattern_anomaly: 1 / file request entropy
+     * weekend_weekday_imbalance: Deviation from expected 2/7 ratio
+
+7. **Active Learning** (identify_uncertain_cases_for_review):
+   - Uses entropy + margin-based uncertainty
+   - Identifies edge cases for human review
+   - Helps discover new attack patterns
+
+These enhancements enable the model to discover NEW bots that don't match
+existing rule patterns, with better generalization to evolving behaviors.
 """
 
 import pandas as pd
@@ -1680,10 +1731,14 @@ def ensemble_bot_discovery(df: pd.DataFrame, feature_columns: List[str],
     ocsvm_predictions = ocsvm.fit_predict(X_scaled)
     ocsvm_scores = -ocsvm.score_samples(X_scaled)
     
-    # Normalize scores to [0, 1]
-    iso_scores = (iso_scores - iso_scores.min()) / (iso_scores.max() - iso_scores.min() + 1e-10)
-    lof_scores = (lof_scores - lof_scores.min()) / (lof_scores.max() - lof_scores.min() + 1e-10)
-    ocsvm_scores = (ocsvm_scores - ocsvm_scores.min()) / (ocsvm_scores.max() - ocsvm_scores.min() + 1e-10)
+    # Normalize scores to [0, 1] - compute min/max once for efficiency
+    iso_min, iso_max = iso_scores.min(), iso_scores.max()
+    lof_min, lof_max = lof_scores.min(), lof_scores.max()
+    ocsvm_min, ocsvm_max = ocsvm_scores.min(), ocsvm_scores.max()
+    
+    iso_scores = (iso_scores - iso_min) / (iso_max - iso_min + 1e-10)
+    lof_scores = (lof_scores - lof_min) / (lof_max - lof_min + 1e-10)
+    ocsvm_scores = (ocsvm_scores - ocsvm_min) / (ocsvm_max - ocsvm_min + 1e-10)
     
     # Count agreements (anomaly = -1, normal = 1)
     predictions = np.column_stack([iso_predictions, lof_predictions, ocsvm_predictions])
@@ -1733,7 +1788,7 @@ def add_bot_signature_features(df: pd.DataFrame) -> pd.DataFrame:
     Add discriminative bot signature features.
     
     Features added:
-    - access_regularity: Std dev of hourly distribution
+    - access_regularity: Inverse of hourly entropy (low entropy = regular = bot-like)
     - ua_per_user: User-Agent diversity per user
     - request_velocity: Downloads per active hour
     - ip_concentration: 1 - IP entropy
@@ -1863,8 +1918,9 @@ def identify_uncertain_cases_for_review(
     
     # 2. Margin-based uncertainty
     # Small margin between top 2 predictions = model is uncertain
-    sorted_probs = np.sort(probs, axis=1)
-    margin = sorted_probs[:, -1] - sorted_probs[:, -2]
+    # Use partition for efficiency: O(n) instead of O(n log n)
+    top_2_probs = np.partition(probs, -2, axis=1)[:, -2:]
+    margin = top_2_probs[:, 1] - top_2_probs[:, 0]
     margin_uncertainty = 1.0 - margin  # Convert to uncertainty (low margin = high uncertainty)
     
     # 3. Combined uncertainty score
