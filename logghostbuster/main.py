@@ -16,6 +16,7 @@ from .models import (
     classify_locations_ml, 
     classify_locations_deep
 )
+from .models.classification.pattern_discovery import classify_with_pattern_discovery
 from .reports import annotate_downloads
 from .reports import generate_report
 from .features.schema import LogSchema, EBI_SCHEMA
@@ -109,6 +110,7 @@ def run_bot_annotator(
     time_window: str = 'month',
     sequence_length: int = 12,
     annotate: bool = True,
+    output_strategy: str = 'new_file',
 ):
     """
     Main function to detect bots and download hubs, and annotate the parquet file.
@@ -128,6 +130,10 @@ def run_bot_annotator(
                   (default: True). NOTE: When sampling is enabled (sample_size is not None),
                   annotation is automatically disabled to avoid overwriting the full dataset
                   with a sampled subset.
+        output_strategy: How to handle output file (default: 'new_file'):
+            - 'new_file': Create a new file with '_annotated' suffix (safest, recommended)
+            - 'reports_only': Don't write to parquet, only generate reports
+            - 'overwrite': Rewrite the original file (may fail if file is locked)
     
     Returns:
         Dictionary with detection results and statistics
@@ -170,6 +176,10 @@ def run_bot_annotator(
         logger.info(f"Minimum location downloads threshold: {schema.min_location_downloads} (from schema)")
     
     conn = duckdb.connect()
+    # Configure memory limits to prevent OOM issues
+    conn.execute("SET memory_limit='4GB'")
+    conn.execute("SET max_memory='4GB'")
+    conn.execute("SET threads=2")  # Limit parallelism to reduce memory pressure
     conn.execute("SET threads=1")  # Single thread for stability
     conn.execute("SET preserve_insertion_order=false")
     
@@ -182,8 +192,12 @@ def run_bot_annotator(
     os.makedirs(temp_directory_abs, exist_ok=True)
     
     conn.execute(f"PRAGMA memory_limit='{memory_limit}'")
-    conn.execute(f"PRAGMA max_temp_directory_size='{max_temp_directory_size}'")
+    # Reduce temp directory size to prevent disk space issues
+    conn.execute("PRAGMA max_temp_directory_size='5GiB'")
     conn.execute(f"PRAGMA temp_directory='{temp_directory_abs}'")
+    # Disable temp file spilling if possible to reduce disk usage
+    conn.execute("SET enable_object_cache=true")
+    conn.execute("SET enable_progress_bar=false")
     
     # Handle sampling if requested
     sampled_file = None
@@ -255,11 +269,48 @@ def run_bot_annotator(
                                                   [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'], 
                                                   contamination=contamination, 
                                                   sequence_length=sequence_length)
+        elif classification_method.lower() == 'pattern':
+            logger.info("Using pattern discovery classification (Contrastive Learning + Clustering)...")
+            logger.info("  Ground Truth Rules:")
+            logger.info("    - BOT: >10K users AND <10 DL/user")
+            logger.info("    - HUB: >1K DL/user")
+            logger.info("    - INDIVIDUAL: ≤5 users AND ≤3 DL/user")
+            logger.info("    - Everything else: Pattern Discovery via Deep Learning")
+            
+            analysis_df, pattern_info = classify_with_pattern_discovery(
+                analysis_df,
+                [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'],
+                input_parquet=input_parquet,
+                conn=conn,
+                enable_behavioral_features=True,
+                embedding_dim=64,
+                contrastive_epochs=50,
+                min_cluster_size=50
+            )
+            
+            # Map discovered patterns to standard categories for compatibility
+            if 'discovered_pattern' in analysis_df.columns:
+                # Ground truth categories map directly
+                analysis_df['is_bot'] = analysis_df['ground_truth_category'] == 'bot'
+                analysis_df['is_download_hub'] = analysis_df['ground_truth_category'] == 'download_hub'
+                
+                # Store discovered patterns for reporting
+                analysis_df['user_category'] = analysis_df['discovered_pattern']
+                
+                # Log pattern info
+                if pattern_info:
+                    logger.info("\nDiscovered Behavioral Patterns:")
+                    for pattern_id, info in pattern_info.items():
+                        logger.info(f"  {info.get('suggested_name', f'Pattern_{pattern_id}')}: "
+                                   f"{info.get('count', 0):,} locations")
+            
+            cluster_df = pd.DataFrame()  # Empty for compatibility
+            
         elif classification_method.lower() == 'rules':
             logger.info("Using rule-based classification...")
             analysis_df = classify_locations(analysis_df)
         else:
-            raise ValueError(f"Unknown classification method: {classification_method}. Must be 'rules', 'ml', or 'deep'")
+            raise ValueError(f"Unknown classification method: {classification_method}. Must be 'rules', 'ml', 'deep', or 'pattern'")
         
         bot_locs = analysis_df[analysis_df['is_bot']].copy()
         hub_locs = analysis_df[analysis_df['is_download_hub']].copy()
@@ -306,31 +357,48 @@ def run_bot_annotator(
                 logger.info(f"  {row['country']:<15} {city:<20} {int(row['unique_users']):>10,} users, "
                            f"{row['downloads_per_user']:.1f} DL/user, {int(row['total_downloads']):>6,} total DL")
         
-        # Decide whether we should annotate in this run.
+        # Decide whether we should run annotation/reporting in this run.
         # IMPORTANT: When sampling is enabled, we must NOT annotate the original
         # parquet with the sampled subset, so we automatically disable annotation.
+        # However, reports_only strategy can still run (it won't write parquet files).
+        # Always run if reports_only is requested (even if annotate=False), as it only generates reports.
         effective_annotate = annotate and (sample_size is None)
+        should_run_annotation = effective_annotate or output_strategy == 'reports_only'
+        
         if annotate and sample_size is not None:
-            logger.info(
-                "Sampling is enabled (sample_size != None); skipping annotation to avoid "
-                "overwriting the full input parquet with a sampled subset. "
-                "To annotate the full dataset, rerun without --sample-size."
-            )
+            if output_strategy == 'reports_only':
+                logger.info(
+                    "Sampling is enabled, but reports_only strategy will still generate reports "
+                    "(no parquet files will be written)."
+                )
+            else:
+                logger.info(
+                    "Sampling is enabled (sample_size != None); skipping annotation to avoid "
+                    "overwriting the full input parquet with a sampled subset. "
+                    "To annotate the full dataset, rerun without --sample-size."
+                )
 
-        # Step 4: Annotate downloads (optional)
+        # Step 4: Annotate downloads or generate reports (optional)
         logger.info("\n" + "=" * 70)
-        logger.info("Step 4: Annotating downloads")
+        if output_strategy == 'reports_only':
+            logger.info("Step 4: Generating reports (no parquet annotation)")
+        else:
+            logger.info("Step 4: Annotating downloads")
         logger.info("=" * 70)
         
-        if effective_annotate:
-            # Output to specified file or same file (overwrite)
-            if output_parquet is None:
+        annotated_file = None
+        if should_run_annotation:
+            # Handle output strategy
+            # For overwrite strategy, default to input file if no output specified
+            # For new_file strategy, output_parquet can be None (auto-generate) or specified by user
+            if output_strategy == 'overwrite' and output_parquet is None:
                 output_parquet = input_parquet
             
-            annotate_downloads(conn, actual_input_parquet, output_parquet, 
-                              bot_locs, hub_locs, output_dir)
+            annotated_file = annotate_downloads(conn, actual_input_parquet, output_parquet, 
+                                                bot_locs, hub_locs, output_dir,
+                                                output_strategy=output_strategy)
         else:
-            logger.info("Annotation skipped (annotate=False).")
+            logger.info("Annotation skipped (annotate=False and output_strategy != 'reports_only').")
         
         # Step 5: Calculate statistics
         logger.info("\n" + "=" * 70)
@@ -422,8 +490,10 @@ def run_bot_annotator(
         logger.info("Bot Annotation Complete!")
         logger.info("=" * 70)
         logger.info(f"\nOutput files:")
-        if effective_annotate and output_parquet is not None:
-            logger.info(f"  - {output_parquet} (annotated with 'bot' and 'download_hub' columns)")
+        if annotated_file:
+            logger.info(f"  - {annotated_file} (annotated with 'bot' and 'download_hub' columns)")
+        elif effective_annotate and output_strategy == 'reports_only':
+            logger.info("  - No parquet file written (reports_only strategy)")
         logger.info(f"  - {output_dir}/bot_detection_report.txt")
         logger.info(f"  - {output_dir}/location_analysis.csv")
         
@@ -431,7 +501,7 @@ def run_bot_annotator(
             'bot_locations': len(bot_locs),
             'hub_locations': len(hub_locs),
             'stats': stats,
-            'output_parquet': output_parquet
+            'output_parquet': annotated_file if annotated_file else None
         }
         
     except Exception as e:
@@ -450,12 +520,16 @@ def main():
     parser = argparse.ArgumentParser(
         description='Annotate downloads with bot and download_hub flags using ML detection'
     )
+    logger.debug("Starting main CLI function...")
     parser.add_argument('--input', '-i', 
                        default='original_data/data_downloads_parquet.parquet',
                        help='Input parquet file')
     parser.add_argument('--output', '-out',
                        default=None,
-                       help='Output parquet file (default: overwrites input)')
+                       help='Output parquet file. Behavior depends on --output-strategy: '
+                            'new_file: creates this file (or auto-generates with _annotated suffix if not specified), '
+                            'reports_only: ignored, '
+                            'overwrite: overwrites this file (or input file if not specified)')
     parser.add_argument('--output-dir', '-o',
                        default='output/bot_analysis',
                        help='Output directory for reports')
@@ -466,8 +540,8 @@ def main():
     parser.add_argument('--sample-size', '-s', type=int, default=None,
                        help='Randomly sample N records from all years before processing (e.g., 1000000 for 1M records)')
     parser.add_argument('--classification-method', '-m', type=str, default='rules',
-                       choices=['rules', 'ml', 'deep'],
-                       help='Classification method: "rules" for rule-based (default), "ml" for supervised ML-based, or "deep" for deep architecture (Isolation Forest + Transformers)')
+                       choices=['rules', 'ml', 'deep', 'pattern'],
+                       help='Classification method: "rules" for rule-based (default), "ml" for supervised ML-based, "deep" for deep architecture (Isolation Forest + Transformers), or "pattern" for pattern discovery (Contrastive Learning + Clustering)')
     parser.add_argument('--min-location-downloads', type=int, default=None,
                        help='Minimum downloads required for a location to be included (default: 1, set higher to filter noise)')
     parser.add_argument('--time-window', type=str, default='month',
@@ -475,8 +549,17 @@ def main():
                        help='Time window granularity for time-series features in deep method (default: month)')
     parser.add_argument('--sequence-length', type=int, default=12,
                        help='Number of time windows to include in the time-series sequence for deep method (default: 12)')
+    parser.add_argument('--output-strategy', type=str, default='new_file',
+                       choices=['new_file', 'reports_only', 'overwrite'],
+                       help='Output file strategy: "new_file" creates annotated file with _annotated suffix (default), "reports_only" only generates reports, "overwrite" rewrites original file')
+    parser.add_argument('--reports-only', action='store_true',
+                       help='Shortcut flag: Only generate reports, skip parquet annotation (equivalent to --output-strategy reports_only)')
     
     args = parser.parse_args()
+    
+    # If --reports-only is set, override output_strategy
+    if args.reports_only:
+        args.output_strategy = 'reports_only'
     
     try:
         run_bot_annotator(
@@ -489,7 +572,8 @@ def main():
             classification_method=args.classification_method,
             min_location_downloads=args.min_location_downloads,
             time_window=args.time_window,
-            sequence_length=args.sequence_length
+            sequence_length=args.sequence_length,
+            output_strategy=args.output_strategy
         )
         
         logger.info("\nDone!")

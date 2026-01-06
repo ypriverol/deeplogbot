@@ -7,24 +7,29 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Configure logging with immediate flushing
+# Use DEBUG level by default, or override with environment variable LOG_LEVEL
+import os
+log_level = os.getenv('LOG_LEVEL', 'DEBUG').upper()
+log_level = getattr(logging, log_level, logging.DEBUG)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
-    force=True  # Force reconfiguration
+    force=True,  # Force reconfiguration
+    stream=sys.stdout  # Explicitly write to stdout for immediate visibility
 )
 
 logger = logging.getLogger(__name__)
 
-# Ensure logs are flushed immediately
-for handler in logger.handlers:
-    handler.flush()
-
-# Also flush stdout/stderr
-if hasattr(sys.stdout, 'flush'):
-    sys.stdout.flush()
-if hasattr(sys.stderr, 'flush'):
-    sys.stderr.flush()
+# Although stream=sys.stdout and python -u should handle flushing,
+# aggressive flushing can be added here if needed, but it's often redundant.
+# for handler in logger.handlers:
+#     handler.flush()
+# if hasattr(sys.stdout, 'flush'):
+#     sys.stdout.flush()
+# if hasattr(sys.stderr, 'flush'):
+#     sys.stderr.flush()
 
 
 def format_number(num):

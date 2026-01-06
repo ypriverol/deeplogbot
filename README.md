@@ -193,8 +193,6 @@ See `examples/custom_schema_example.py` for more detailed examples.
 ## Environment Variables
 
 - `USE_LLM_GROUPING`: Enable/disable LLM-based location grouping (default: `true`)
-- `OLLAMA_URL`: Ollama server URL (default: `http://localhost:11434`)
-- `OLLAMA_MODEL`: Ollama model name (default: `llama3.2`)
 - `HF_MODEL`: Hugging Face model name (default: `microsoft/DialoGPT-medium`)
 
 ## Comparing Classification Methods

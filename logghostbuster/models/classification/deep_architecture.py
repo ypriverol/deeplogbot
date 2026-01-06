@@ -13,13 +13,786 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Tuple
 
 from ...utils import logger
 from ..isoforest.models import train_isolation_forest
+
+
+# =====================================================================
+# Constants for Bot Detection
+# =====================================================================
+
+# Bot label signal weights
+BOT_SIGNAL_WEIGHTS = {
+    'FEW_USERS_EXTREME_DL': 0.8,
+    'VERY_FEW_USERS_HIGH_DL': 0.6,
+    'MODERATE_USERS_HIGH_DL': 0.5,
+    'RULE_BOT': 0.5,
+    'RULE_HUB': 0.4,
+    'EXTREME_DL_ZSCORE': 0.4,
+    'HIGH_ANOMALY': 0.3,
+    'NON_WORKING_HIGH_ACTIVITY': 0.2,
+    'VERY_HIGH_ANOMALY': 0.2,
+    'VERY_EXTREME_DL_ZSCORE': 0.2,
+    'LOW_ENTROPY': 0.15,
+}
+
+# Bot detection thresholds
+BOT_THRESHOLDS = {
+    'FEW_USERS': 100,
+    'VERY_FEW_USERS': 50,
+    'EXTREME_DL_PER_USER': 50,
+    'HIGH_DL_PER_USER': 30,
+    'MODERATE_DL_PER_USER': 20,
+    'HIGH_ANOMALY_SCORE': 0.2,
+    'VERY_HIGH_ANOMALY_SCORE': 0.25,
+    'LOW_WORKING_HOURS_RATIO': 0.3,
+    'MIN_TOTAL_DOWNLOADS': 1000,
+    'EXTREME_ZSCORE': 3.0,
+    'VERY_EXTREME_ZSCORE': 4.0,
+    'ADAPTIVE_THRESHOLD_PERCENTILE': 85,
+    'FIXED_THRESHOLD': 0.5,
+    'LOW_ENTROPY_QUANTILE': 0.2,
+}
+
+# Override thresholds (lowered for better bot detection)
+OVERRIDE_THRESHOLDS = {
+    'OVERRIDE1_DL_PER_USER': 30,  # Was 50
+    'OVERRIDE1_MAX_USERS': 200,   # Was 100
+    'OVERRIDE2_DL_PER_USER': 20,  # Was 30
+    'OVERRIDE2_MAX_USERS': 100,   # Was 50
+}
+
+# Stratified processing thresholds
+STRATIFICATION_THRESHOLDS = {
+    'OBVIOUS_BOT_USERS': 2000,           # >2000 users = obvious bot
+    'OBVIOUS_BOT_SINGLE_USER_DL': 1000,  # Single user with >1000 DL = bot
+    'OBVIOUS_BOT_DL_PER_USER': 100,      # >100 DL/user with >500 users = bot
+    'OBVIOUS_BOT_MODERATE_DL': 200,      # >200 DL/user with >100 users = bot
+    'LEGITIMATE_MAX_USERS': 5,           # <=5 users
+    'LEGITIMATE_MAX_DL_PER_USER': 3,     # <=3 DL/user
+    'LEGITIMATE_MAX_TOTAL_DL': 50,       # <50 total downloads
+    'LEGITIMATE_MAX_ANOMALY': 0.15,      # Low anomaly score
+}
+
+# Scale-aware anomaly detection thresholds
+SCALE_THRESHOLDS = {
+    'SMALL_MAX_USERS': 100,              # Small locations: 1-100 users
+    'MEDIUM_MAX_USERS': 2000,            # Medium locations: 100-2000 users
+    'SMALL_CONTAMINATION': 0.10,         # 10% bots in small locations
+    'MEDIUM_CONTAMINATION': 0.20,        # 20% bots in medium locations
+}
+
+# Bot likelihood scoring weights
+BOT_LIKELIHOOD_WEIGHTS = {
+    'USER_COUNT_LOG': 0.10,              # log(users) / 10
+    'DL_PER_USER': 0.04,                 # DL/user / 25, capped at 2
+    'HOURLY_ENTROPY': 0.20,              # entropy / 5
+    'NIGHT_ACTIVITY': 3.0,               # night ratio * 3
+    'BURST_COEFFICIENT': 0.10,           # burst / 10, capped at 3
+    'LOW_WORKING_HOURS': 2.0,            # Penalty for low working hours
+    'HIGH_DL_CONCENTRATION': 2.0,        # High DL concentration penalty
+}
+
+# Confidence thresholds
+CONFIDENCE_THRESHOLDS = {
+    'HIGH_CONFIDENCE': 0.7,              # Trust predictions above this
+    'LOW_CONFIDENCE': 0.4,               # Flag for review below this
+}
+
+# Feature weights for composite score
+COMPOSITE_SCORE_WEIGHTS = {
+    'DL_USER_PER_LOG_USERS': 0.3,
+    'USER_SCARCITY': 0.25,
+    'DOWNLOAD_CONCENTRATION': 0.25,
+    'ANOMALY_SCORE': 0.2,
+}
+
+# Focal loss parameters
+FOCAL_LOSS_ALPHA = 0.75
+FOCAL_LOSS_GAMMA = 2.0
+
+# Attention and model parameters
+ATTENTION_RESIDUAL_WEIGHT = 0.5
+ANOMALY_SCORE_OFFSET = 0.5
+LOG_USERS_OFFSET = 2
+EPSILON = 1e-10
+
+
+# =====================================================================
+# Phase 5 Improvements: Smart pseudo-labels and enhanced architecture
+# =====================================================================
+
+class FocalLoss(nn.Module):
+    """Focal Loss for addressing class imbalance in bot detection."""
+    def __init__(self, alpha: float = FOCAL_LOSS_ALPHA, gamma: float = FOCAL_LOSS_GAMMA):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        return focal_loss.mean()
+
+
+class EnhancedBotHead(nn.Module):
+    """Enhanced bot detection head with attention mechanism."""
+    def __init__(self, input_dim: int, hidden_dim: int = 256, dropout: float = 0.2):
+        super().__init__()
+        
+        # Self-attention for feature relationships
+        self.attention = nn.MultiheadAttention(
+            embed_dim=input_dim,
+            num_heads=4,
+            dropout=dropout * 0.5,
+            batch_first=True
+        )
+        
+        # Feature interaction layers
+        self.interaction_layer = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout * 0.5)
+        )
+        
+        # Gating mechanism
+        self.gate = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim // 2),
+            nn.Sigmoid()
+        )
+        
+        # Context layer
+        self.context_layer = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim // 4),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 4, hidden_dim // 2)
+        )
+        
+        # Final classifier
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(hidden_dim // 2, 2)  # Binary: bot or not
+        )
+        
+    def forward(self, x):
+        # Add sequence dimension for attention
+        x_seq = x.unsqueeze(1)
+        
+        # Self-attention
+        attn_out, _ = self.attention(x_seq, x_seq, x_seq)
+        attn_out = attn_out.squeeze(1)
+        
+        # Residual connection
+        combined = x + ATTENTION_RESIDUAL_WEIGHT * attn_out
+        
+        # Feature interaction with gating
+        interaction_out = self.interaction_layer(combined)
+        gate_out = self.gate(combined)
+        gated_features = interaction_out * gate_out
+        
+        # Context features
+        context_features = self.context_layer(x)
+        
+        # Combine features
+        final_features = torch.cat([gated_features, context_features], dim=1)
+        
+        # Final classification
+        return self.classifier(final_features)
+
+
+def _has_required_columns(df: pd.DataFrame, *columns: str) -> bool:
+    """Check if DataFrame has all required columns."""
+    return all(col in df.columns for col in columns)
+
+
+# =====================================================================
+# Phase 6: Stratified Processing, Scale-Aware Detection, Bot Likelihood
+# =====================================================================
+
+def stratified_prefilter(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    Multi-tier pre-filtering to separate obvious cases from uncertain ones.
+    
+    This significantly reduces computational load and improves accuracy by:
+    1. Skipping deep learning for obvious bots (>2000 users)
+    2. Skipping deep learning for obvious legitimate users (<5 users, <3 DL/user)
+    3. Focusing deep learning on genuinely ambiguous patterns
+    
+    Args:
+        df: DataFrame with location features
+        
+    Returns:
+        Tuple of (obvious_bots, obvious_legitimate, uncertain) boolean Series
+    """
+    thresholds = STRATIFICATION_THRESHOLDS
+    
+    # Tier 1: Obvious bots (high confidence)
+    obvious_bots = pd.Series(False, index=df.index)
+    
+    if _has_required_columns(df, 'unique_users', 'total_downloads', 'downloads_per_user'):
+        obvious_bots = (
+            # Primary threshold: >2000 users per location
+            (df['unique_users'] > thresholds['OBVIOUS_BOT_USERS']) |
+            
+            # Single user hammering (1 user with >1000 downloads)
+            ((df['unique_users'] == 1) & (df['total_downloads'] > thresholds['OBVIOUS_BOT_SINGLE_USER_DL'])) |
+            
+            # Coordinated high-volume activity (>100 DL/user with >500 users)
+            ((df['downloads_per_user'] > thresholds['OBVIOUS_BOT_DL_PER_USER']) & 
+             (df['unique_users'] > 500)) |
+            
+            # Extreme download concentration (>200 DL/user with >100 users)
+            ((df['downloads_per_user'] > thresholds['OBVIOUS_BOT_MODERATE_DL']) & 
+             (df['unique_users'] > 100))
+        )
+    
+    # Tier 2: Obvious legitimate (high confidence)
+    obvious_legitimate = pd.Series(False, index=df.index)
+    
+    if _has_required_columns(df, 'unique_users', 'downloads_per_user', 'total_downloads'):
+        base_legitimate = (
+            (df['unique_users'] <= thresholds['LEGITIMATE_MAX_USERS']) & 
+            (df['downloads_per_user'] <= thresholds['LEGITIMATE_MAX_DL_PER_USER']) &
+            (df['total_downloads'] < thresholds['LEGITIMATE_MAX_TOTAL_DL'])
+        )
+        
+        # Add anomaly score check if available
+        if 'anomaly_score' in df.columns:
+            obvious_legitimate = base_legitimate & (df['anomaly_score'] < thresholds['LEGITIMATE_MAX_ANOMALY'])
+        else:
+            obvious_legitimate = base_legitimate
+    
+    # Tier 3: Uncertain - needs deep analysis
+    uncertain = ~(obvious_bots | obvious_legitimate)
+    
+    # Log statistics
+    n_obvious_bots = obvious_bots.sum()
+    n_obvious_legitimate = obvious_legitimate.sum()
+    n_uncertain = uncertain.sum()
+    total = len(df)
+    
+    logger.info(f"  Stratified pre-filtering results:")
+    logger.info(f"    Tier 1 (Obvious bots): {n_obvious_bots:,} ({n_obvious_bots/total*100:.1f}%)")
+    logger.info(f"    Tier 2 (Obvious legitimate): {n_obvious_legitimate:,} ({n_obvious_legitimate/total*100:.1f}%)")
+    logger.info(f"    Tier 3 (Uncertain - deep analysis): {n_uncertain:,} ({n_uncertain/total*100:.1f}%)")
+    
+    return obvious_bots, obvious_legitimate, uncertain
+
+
+def compute_bot_likelihood_score(df: pd.DataFrame) -> np.ndarray:
+    """
+    Compute a composite bot likelihood score for each location.
+    
+    Higher scores indicate higher probability of being a bot.
+    Typical range: 0-15+ (bots: 8-12, legitimate: 1-3)
+    
+    Args:
+        df: DataFrame with location features
+        
+    Returns:
+        numpy array of bot likelihood scores
+    """
+    weights = BOT_LIKELIHOOD_WEIGHTS
+    score = np.zeros(len(df))
+    
+    # Signal 1: User count (logarithmic scale)
+    # More users = higher likelihood of being a bot farm
+    if 'unique_users' in df.columns:
+        score += np.log1p(df['unique_users'].values) * weights['USER_COUNT_LOG']
+    
+    # Signal 2: Downloads per user
+    # High DL/user = bot-like behavior
+    if 'downloads_per_user' in df.columns:
+        score += np.clip(df['downloads_per_user'].values * weights['DL_PER_USER'], 0, 2)
+    
+    # Signal 3: Temporal irregularity (hourly entropy)
+    # High entropy = irregular patterns = bot-like
+    if 'hourly_entropy' in df.columns:
+        score += df['hourly_entropy'].values * weights['HOURLY_ENTROPY']
+    
+    # Signal 4: Night activity ratio
+    # Bots work 24/7, humans sleep
+    if 'night_ratio' in df.columns:
+        score += df['night_ratio'].values * weights['NIGHT_ACTIVITY']
+    elif 'working_hours_ratio' in df.columns:
+        # Invert: low working hours = high night activity
+        score += (1 - df['working_hours_ratio'].values) * weights['LOW_WORKING_HOURS']
+    
+    # Signal 5: Burst coefficient (spike ratio)
+    # Sudden spikes = bot behavior
+    if 'spike_ratio' in df.columns:
+        score += np.clip(df['spike_ratio'].values * weights['BURST_COEFFICIENT'], 0, 3)
+    
+    # Signal 6: Download concentration
+    # High concentration with moderate users = suspicious
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        concentration = df['downloads_per_user'].values / (np.log(df['unique_users'].values + 2))
+        high_concentration = concentration > np.percentile(concentration, 90)
+        score[high_concentration] += weights['HIGH_DL_CONCENTRATION']
+    
+    # Signal 7: Anomaly score boost
+    if 'anomaly_score' in df.columns:
+        score += df['anomaly_score'].values * 3  # Scale anomaly to similar range
+    
+    return score
+
+
+def scale_aware_anomaly_detection(df: pd.DataFrame, feature_columns: List[str], 
+                                   contamination: float = 0.15) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Run separate anomaly detection for different user count scales.
+    
+    Different scales have different bot patterns:
+    - Small locations (1-100 users): Focus on DL/user ratio, temporal patterns
+    - Medium locations (100-2000 users): Focus on coordination, user diversity
+    
+    Args:
+        df: DataFrame with location features
+        feature_columns: List of feature column names
+        contamination: Base contamination rate
+        
+    Returns:
+        Tuple of (predictions, anomaly_scores)
+    """
+    from sklearn.ensemble import IsolationForest
+    
+    thresholds = SCALE_THRESHOLDS
+    predictions = np.zeros(len(df))
+    anomaly_scores = np.zeros(len(df))
+    
+    # Prepare feature matrix
+    X = df[feature_columns].fillna(0).values
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Small locations (1-100 users): Different bot patterns
+    small_mask = (df['unique_users'] >= 1) & (df['unique_users'] <= thresholds['SMALL_MAX_USERS'])
+    if small_mask.any():
+        logger.info(f"    Scale-aware: Processing {small_mask.sum():,} small locations (1-{thresholds['SMALL_MAX_USERS']} users)")
+        
+        iso_forest_small = IsolationForest(
+            contamination=thresholds['SMALL_CONTAMINATION'],
+            n_estimators=100,
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        small_indices = np.where(small_mask)[0]
+        X_small = X_scaled[small_indices]
+        
+        predictions[small_indices] = iso_forest_small.fit_predict(X_small)
+        anomaly_scores[small_indices] = -iso_forest_small.score_samples(X_small)
+    
+    # Medium locations (100-2000 users): Your "uncertain" zone
+    medium_mask = ((df['unique_users'] > thresholds['SMALL_MAX_USERS']) & 
+                   (df['unique_users'] <= thresholds['MEDIUM_MAX_USERS']))
+    if medium_mask.any():
+        logger.info(f"    Scale-aware: Processing {medium_mask.sum():,} medium locations ({thresholds['SMALL_MAX_USERS']}-{thresholds['MEDIUM_MAX_USERS']} users)")
+        
+        iso_forest_medium = IsolationForest(
+            contamination=thresholds['MEDIUM_CONTAMINATION'],
+            n_estimators=100,
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        medium_indices = np.where(medium_mask)[0]
+        X_medium = X_scaled[medium_indices]
+        
+        predictions[medium_indices] = iso_forest_medium.fit_predict(X_medium)
+        anomaly_scores[medium_indices] = -iso_forest_medium.score_samples(X_medium)
+    
+    # Large locations (>2000 users): Already pre-filtered, but process if any remain
+    large_mask = df['unique_users'] > thresholds['MEDIUM_MAX_USERS']
+    if large_mask.any():
+        logger.info(f"    Scale-aware: Processing {large_mask.sum():,} large locations (>{thresholds['MEDIUM_MAX_USERS']} users)")
+        
+        iso_forest_large = IsolationForest(
+            contamination=0.30,  # Higher contamination for large locations
+            n_estimators=100,
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        large_indices = np.where(large_mask)[0]
+        X_large = X_scaled[large_indices]
+        
+        predictions[large_indices] = iso_forest_large.fit_predict(X_large)
+        anomaly_scores[large_indices] = -iso_forest_large.score_samples(X_large)
+    
+    # Normalize anomaly scores to 0-1 range
+    if anomaly_scores.max() > anomaly_scores.min():
+        anomaly_scores = (anomaly_scores - anomaly_scores.min()) / (anomaly_scores.max() - anomaly_scores.min())
+    
+    return predictions, anomaly_scores
+
+
+def confidence_based_classification(df: pd.DataFrame, logits: torch.Tensor, 
+                                     bot_logits: Optional[torch.Tensor] = None,
+                                     category_map: Optional[dict] = None) -> pd.DataFrame:
+    """
+    Apply confidence-based classification with fallback strategies.
+    
+    Only trusts high-confidence predictions. Low-confidence cases
+    are flagged for review or use bot head as fallback.
+    
+    Args:
+        df: DataFrame with location features
+        logits: Classification logits from the model
+        bot_logits: Optional bot head logits
+        category_map: Mapping from class indices to category names
+        
+    Returns:
+        DataFrame with classification results and confidence levels
+    """
+    thresholds = CONFIDENCE_THRESHOLDS
+    
+    if category_map is None:
+        category_map = {0: 'bot', 1: 'download_hub', 2: 'independent_user', 3: 'normal', 4: 'other'}
+    
+    # Get prediction probabilities
+    probs = F.softmax(logits, dim=1)
+    max_probs, predicted = torch.max(probs, dim=1)
+    
+    max_probs_np = max_probs.cpu().numpy()
+    predicted_np = predicted.cpu().numpy()
+    
+    # Initialize columns
+    df['user_category'] = 'other'
+    df['classification_confidence'] = max_probs_np
+    df['needs_review'] = False
+    
+    # High confidence: Trust the prediction
+    high_confidence_mask = max_probs_np >= thresholds['HIGH_CONFIDENCE']
+    if high_confidence_mask.any():
+        high_conf_indices = np.where(high_confidence_mask)[0]
+        df.iloc[high_conf_indices, df.columns.get_loc('user_category')] = [
+            category_map[pred] for pred in predicted_np[high_conf_indices]
+        ]
+    
+    # Medium confidence: Use prediction but flag for potential review
+    medium_confidence_mask = (max_probs_np >= thresholds['LOW_CONFIDENCE']) & \
+                             (max_probs_np < thresholds['HIGH_CONFIDENCE'])
+    if medium_confidence_mask.any():
+        medium_conf_indices = np.where(medium_confidence_mask)[0]
+        df.iloc[medium_conf_indices, df.columns.get_loc('user_category')] = [
+            category_map[pred] for pred in predicted_np[medium_conf_indices]
+        ]
+    
+    # Low confidence: Use bot head as fallback or flag for review
+    low_confidence_mask = max_probs_np < thresholds['LOW_CONFIDENCE']
+    if low_confidence_mask.any():
+        low_conf_indices = np.where(low_confidence_mask)[0]
+        df.iloc[low_conf_indices, df.columns.get_loc('needs_review')] = True
+        
+        if bot_logits is not None:
+            # Use bot head as fallback
+            bot_probs = F.softmax(bot_logits, dim=1)
+            _, bot_predicted = torch.max(bot_probs, dim=1)
+            bot_predicted_np = bot_predicted.cpu().numpy()
+            
+            for idx in low_conf_indices:
+                if bot_predicted_np[idx] == 1:  # Bot head says bot
+                    df.iloc[idx, df.columns.get_loc('user_category')] = 'bot'
+                else:
+                    df.iloc[idx, df.columns.get_loc('user_category')] = 'other'
+        else:
+            # No bot head, mark as other
+            df.iloc[low_conf_indices, df.columns.get_loc('user_category')] = 'other'
+    
+    # Log statistics
+    n_high = high_confidence_mask.sum()
+    n_medium = medium_confidence_mask.sum()
+    n_low = low_confidence_mask.sum()
+    total = len(df)
+    
+    logger.info(f"  Confidence-based classification:")
+    logger.info(f"    High confidence (>={thresholds['HIGH_CONFIDENCE']}): {n_high:,} ({n_high/total*100:.1f}%)")
+    logger.info(f"    Medium confidence: {n_medium:,} ({n_medium/total*100:.1f}%)")
+    logger.info(f"    Low confidence (<{thresholds['LOW_CONFIDENCE']}): {n_low:,} ({n_low/total*100:.1f}%)")
+    
+    return df
+
+
+def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate intelligent bot labels based on multiple signals.
+    
+    CRITICAL: Bots and Download Hubs have OPPOSITE patterns!
+    - BOTS: Many users (>1000), low-moderate DL/user (<50), coordinated behavior
+    - HUBS: Few users (<100), VERY high DL/user (>500), legitimate mirrors
+    
+    This function should ONLY give high scores to BOT patterns, NOT hub patterns.
+    
+    Args:
+        df: DataFrame with location features
+        
+    Returns:
+        Tuple of (hard_labels, soft_labels) as numpy arrays
+    """
+    # Initialize bot score (0-1)
+    bot_score = np.zeros(len(df))
+    
+    # First, identify download hubs - these should NEVER get bot labels
+    is_download_hub = pd.Series(False, index=df.index)
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        # Hub pattern: Very high DL/user with few users
+        is_download_hub = (
+            ((df['downloads_per_user'] > 500) & (df['unique_users'] < 100)) |
+            (df['downloads_per_user'] > 1000)  # Extreme DL/user is always a hub
+        )
+    
+    # =========================================================================
+    # BOT SIGNALS: Focus on MANY users + low-moderate DL/user
+    # =========================================================================
+    
+    # Signal 1: Many users with low DL/user (classic bot farm pattern)
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        # Bot pattern: Many users, low DL/user
+        many_users_low_dl = (
+            (df['unique_users'] > 1000) &  # Many users
+            (df['downloads_per_user'] < 20) &  # Low DL/user
+            ~is_download_hub  # NOT a hub
+        )
+        bot_score[many_users_low_dl] += 0.7
+        
+        # Bot pattern: Very many users, moderate DL/user
+        very_many_users_moderate_dl = (
+            (df['unique_users'] > 5000) &  # Very many users
+            (df['downloads_per_user'] >= 20) &
+            (df['downloads_per_user'] < 100) &  # Moderate DL/user
+            ~is_download_hub
+        )
+        bot_score[very_many_users_moderate_dl] += 0.6
+        
+        # Bot pattern: Moderate users with suspicious DL/user ratio
+        moderate_users_suspicious = (
+            (df['unique_users'] > 500) &
+            (df['unique_users'] <= 5000) &
+            (df['downloads_per_user'] > 10) &
+            (df['downloads_per_user'] < 50) &
+            ~is_download_hub
+        )
+        bot_score[moderate_users_suspicious] += 0.4
+    
+    # Signal 2: High anomaly score (only for non-hubs)
+    if 'anomaly_score' in df.columns:
+        high_anomaly_non_hub = (df['anomaly_score'] > BOT_THRESHOLDS['HIGH_ANOMALY_SCORE']) & ~is_download_hub
+        very_high_anomaly_non_hub = (df['anomaly_score'] > BOT_THRESHOLDS['VERY_HIGH_ANOMALY_SCORE']) & ~is_download_hub
+        bot_score[high_anomaly_non_hub] += 0.2
+        bot_score[very_high_anomaly_non_hub] += 0.15
+    
+    # Signal 3: Low working hours ratio with high activity (bots work 24/7)
+    if _has_required_columns(df, 'working_hours_ratio', 'total_downloads', 'unique_users'):
+        non_working_high_activity = (
+            (df['working_hours_ratio'] < BOT_THRESHOLDS['LOW_WORKING_HOURS_RATIO']) &
+            (df['total_downloads'] > BOT_THRESHOLDS['MIN_TOTAL_DOWNLOADS']) &
+            (df['unique_users'] > 100) &  # Bots have many users
+            ~is_download_hub
+        )
+        bot_score[non_working_high_activity] += 0.25
+    
+    # Signal 4: Low hourly entropy (coordinated access patterns)
+    if 'hourly_entropy' in df.columns and 'unique_users' in df.columns:
+        low_entropy_many_users = (
+            (df['hourly_entropy'] < df['hourly_entropy'].quantile(BOT_THRESHOLDS['LOW_ENTROPY_QUANTILE'])) &
+            (df['unique_users'] > 100) &  # Bots have many users
+            ~is_download_hub
+        )
+        bot_score[low_entropy_many_users] += 0.15
+    
+    # Signal 5: Original rule-based bot classification (only for bots, NOT hubs)
+    if 'user_category' in df.columns:
+        rule_bot = df['user_category'] == 'bot'
+        bot_score[rule_bot & ~is_download_hub] += 0.5
+        # NOTE: We do NOT add score for hubs anymore!
+    
+    # =========================================================================
+    # NEGATIVE SIGNALS: Reduce score for hub-like patterns
+    # =========================================================================
+    # Locations that look like hubs should have REDUCED bot scores
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        hub_like = (
+            (df['downloads_per_user'] > 100) & 
+            (df['unique_users'] < 50)
+        )
+        bot_score[hub_like] *= 0.1  # Reduce score by 90%
+    
+    # Normalize to [0, 1]
+    bot_score = np.clip(bot_score, 0, 1)
+    
+    # Force hubs to have zero bot score
+    bot_score[is_download_hub.values] = 0.0
+    
+    # Create both soft and hard labels
+    soft_labels = bot_score
+    
+    # Adaptive threshold (stricter)
+    percentile_threshold = np.percentile(bot_score[bot_score > 0], 75) if (bot_score > 0).any() else 0.5
+    fixed_threshold = 0.4  # Stricter threshold
+    threshold = max(percentile_threshold, fixed_threshold)  # Use MAX not MIN for stricter filtering
+    
+    hard_labels = (bot_score >= threshold).astype(float)
+    
+    logger.info(f"    Smart bot label statistics:")
+    logger.info(f"      - Download hubs excluded: {is_download_hub.sum()}")
+    logger.info(f"      - Locations with bot score > 0: {(bot_score > 0).sum()}")
+    logger.info(f"      - Locations with bot score > 0.5: {(bot_score > 0.5).sum()}")
+    logger.info(f"      - Threshold used: {threshold:.3f}")
+    logger.info(f"      - Hard bot labels: {hard_labels.sum()}")
+    
+    return hard_labels, soft_labels
+
+
+def add_bot_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add interaction features for better bot detection.
+    
+    Args:
+        df: DataFrame with location features
+        
+    Returns:
+        DataFrame with additional interaction features
+    """
+    # Core bot pattern: High DL/user with few users
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        df['dl_user_per_log_users'] = df['downloads_per_user'] / np.log(df['unique_users'] + LOG_USERS_OFFSET)
+        
+        df['user_scarcity_score'] = np.where(
+            df['downloads_per_user'] > BOT_THRESHOLDS['MODERATE_DL_PER_USER'],
+            np.exp(-df['unique_users'] / BOT_THRESHOLDS['FEW_USERS']),
+            0
+        )
+        
+        df['download_concentration'] = df['downloads_per_user'] * (1 / (df['unique_users'] + 1))
+    
+    # Anomaly-weighted features
+    if 'anomaly_score' in df.columns and 'downloads_per_user' in df.columns:
+        df['anomaly_dl_interaction'] = (df['anomaly_score'] + ANOMALY_SCORE_OFFSET).clip(0, 1) * df['downloads_per_user']
+    
+    # Temporal features
+    if 'hourly_entropy' in df.columns and 'downloads_per_user' in df.columns:
+        df['temporal_irregularity'] = (1 / (df['hourly_entropy'] + 0.1)) * np.log(df['downloads_per_user'] + 1)
+    
+    # Composite bot score
+    score_components = []
+    weights = []
+    
+    if 'dl_user_per_log_users' in df.columns:
+        max_val = df['dl_user_per_log_users'].quantile(0.95)
+        if max_val > EPSILON:
+            score_components.append(np.clip(df['dl_user_per_log_users'] / max_val, 0, 1))
+            weights.append(COMPOSITE_SCORE_WEIGHTS['DL_USER_PER_LOG_USERS'])
+    
+    if 'user_scarcity_score' in df.columns:
+        score_components.append(df['user_scarcity_score'])
+        weights.append(COMPOSITE_SCORE_WEIGHTS['USER_SCARCITY'])
+    
+    if 'download_concentration' in df.columns:
+        max_val = df['download_concentration'].quantile(0.95)
+        if max_val > EPSILON:
+            score_components.append(np.clip(df['download_concentration'] / max_val, 0, 1))
+            weights.append(COMPOSITE_SCORE_WEIGHTS['DOWNLOAD_CONCENTRATION'])
+    
+    if 'anomaly_score' in df.columns:
+        score_components.append((df['anomaly_score'] + ANOMALY_SCORE_OFFSET).clip(0, 1))
+        weights.append(COMPOSITE_SCORE_WEIGHTS['ANOMALY_SCORE'])
+    
+    if score_components:
+        weights = np.array(weights) / np.sum(weights)
+        df['bot_composite_score'] = sum(w * s for w, s in zip(weights, score_components))
+    
+    return df
+
+
+def apply_bot_detection_override(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply post-processing overrides for obvious bot patterns.
+    
+    CRITICAL: Bots and Download Hubs have OPPOSITE patterns!
+    - BOTS: Many users (>1000), low-moderate DL/user (<50), coordinated behavior
+    - HUBS: Few users (<100), VERY high DL/user (>500), legitimate mirrors
+    
+    This function should ONLY override to 'bot' for BOT patterns.
+    """
+    
+    override_count = 0
+    hub_override_count = 0
+    
+    # First, protect download hubs - these should NEVER be classified as bots
+    # Ensure is_protected_hub is boolean type (not float with NaN)
+    if 'is_protected_hub' not in df.columns:
+        df['is_protected_hub'] = False
+    else:
+        # Convert to boolean, treating NaN as False
+        df['is_protected_hub'] = df['is_protected_hub'].fillna(False).astype(bool)
+    
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        # Hub pattern: Very high DL/user with few users (mirrors, institutional)
+        obvious_hubs = (
+            ((df['downloads_per_user'] > 500) & (df['unique_users'] < 100)) |
+            (df['downloads_per_user'] > 1000)
+        )
+        
+        if obvious_hubs.any():
+            logger.info(f"    Protecting {obvious_hubs.sum()} download hub patterns from bot override")
+            df.loc[obvious_hubs, 'is_protected_hub'] = True
+            df.loc[obvious_hubs, 'user_category'] = 'download_hub'
+            df.loc[obvious_hubs, 'is_bot_neural'] = False
+            hub_override_count = obvious_hubs.sum()
+    
+    # BOT Override 1: Many users with moderate DL/user (distributed bot farm)
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        obvious_bots = (
+            (df['unique_users'] > 5000) &  # Many users (bot farms)
+            (df['downloads_per_user'] > 10) &
+            (df['downloads_per_user'] < 100) &  # Moderate DL/user
+            (df['is_protected_hub'] == False)  # NOT a protected hub
+        )
+        
+        if 'is_bot_neural' in df.columns:
+            obvious_bots = obvious_bots & (df['is_bot_neural'] == False)
+        
+        if obvious_bots.any():
+            logger.info(f"    Applying bot override for {obvious_bots.sum()} obvious bot patterns "
+                       f"(>5000 users, 10-100 DL/user)")
+            df.loc[obvious_bots, 'is_bot_neural'] = True
+            df.loc[obvious_bots, 'user_category'] = 'bot'
+            override_count += obvious_bots.sum()
+    
+    # BOT Override 2: Very many users with low DL/user (coordinated access)
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        coordinated_bots = (
+            (df['unique_users'] > 10000) &  # Very many users
+            (df['downloads_per_user'] < 20) &  # Low DL/user (coordinated)
+            (df['is_protected_hub'] == False)  # NOT a protected hub
+        )
+        
+        if 'is_bot_neural' in df.columns:
+            coordinated_bots = coordinated_bots & (df['is_bot_neural'] == False)
+        
+        if coordinated_bots.any():
+            logger.info(f"    Applying bot override for {coordinated_bots.sum()} coordinated bot patterns "
+                      f"(>10000 users, <20 DL/user)")
+            df.loc[coordinated_bots, 'is_bot_neural'] = True
+            df.loc[coordinated_bots, 'user_category'] = 'bot'
+            override_count += coordinated_bots.sum()
+    
+    logger.info(f"    Total bot overrides applied: {override_count}")
+    logger.info(f"    Total hub protections applied: {hub_override_count}")
+    
+    return df
 
 
 class TransformerClassifier(nn.Module):
@@ -27,7 +800,7 @@ class TransformerClassifier(nn.Module):
     
     def __init__(self, ts_input_dim: int, fixed_input_dim: int, d_model: int = 128, 
                  nhead: int = 8, num_layers: int = 3, dim_feedforward: int = 512,
-                 num_classes: int = 5, enable_reconstruction: bool = False):
+                 num_classes: int = 5, enable_reconstruction: bool = False, enable_bot_head: bool = False):
         """
         Args:
             ts_input_dim: Dimension of time-series features per window
@@ -76,9 +849,15 @@ class TransformerClassifier(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(dim_feedforward // 2, num_classes)
         )
+
+        # Optional: Binary classification head for 'is_bot' prediction
+        self.enable_bot_head = enable_bot_head
+        if enable_bot_head:
+            # Enhanced bot head with attention mechanism
+            self.bot_head = EnhancedBotHead(combined_dim, hidden_dim=dim_feedforward // 2)
     
     def forward(self, ts_features: torch.Tensor, fixed_features: torch.Tensor, 
-                mask_indices: Optional[torch.Tensor] = None, return_reconstruction: bool = False) -> torch.Tensor:
+                mask_indices: Optional[torch.Tensor] = None, return_reconstruction: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Forward pass combining time-series and fixed features.
         
@@ -89,7 +868,7 @@ class TransformerClassifier(nn.Module):
             return_reconstruction: Whether to return reconstruction for masked steps
         
         Returns:
-            Classification logits [batch_size, num_classes] or tuple (logits, reconstruction) if return_reconstruction
+            Tuple of (classification_logits [batch_size, num_classes], bot_logits [batch_size, 2] or None, reconstruction [batch_size, seq_len, ts_input_dim] or None)
         """
         # Encode time-series features
         ts_proj = self.ts_input_projection(ts_features)
@@ -107,9 +886,15 @@ class TransformerClassifier(nn.Module):
         if return_reconstruction and self.enable_reconstruction and mask_indices is not None:
             # Reconstruct masked time steps
             reconstruction = self.reconstruction_head(ts_encoded)  # [batch_size, seq_len, ts_input_dim]
-            return logits, reconstruction
         else:
-            return logits
+            reconstruction = None
+
+        if self.enable_bot_head:
+            bot_logits = self.bot_head(combined) # [batch_size, 2]
+        else:
+            bot_logits = None
+        
+        return logits, bot_logits, reconstruction
 
 
 class TimeSeriesDataset(Dataset):
@@ -218,7 +1003,7 @@ def train_self_supervised(
             optimizer.zero_grad()
             
             # Forward pass with reconstruction
-            _, reconstruction = classifier(
+            _, _, reconstruction = classifier(
                 ts_batch, fixed_batch, 
                 mask_indices=mask_batch, 
                 return_reconstruction=True
@@ -244,7 +1029,7 @@ def train_self_supervised(
                 fixed_batch = fixed_batch.to(device)
                 mask_batch = mask_batch.to(device)
                 
-                _, reconstruction = classifier(
+                _, _, reconstruction = classifier(
                     ts_batch, fixed_batch,
                     mask_indices=mask_batch,
                     return_reconstruction=True
@@ -289,8 +1074,10 @@ def train_supervised_classifier(
     epochs: int = 30,
     batch_size: int = 256,
     learning_rate: float = 1e-4,
-    validation_split: float = 0.1,
-    class_weights: Optional[torch.Tensor] = None
+                 validation_split: float = 0.1,
+                 class_weights: Optional[torch.Tensor] = None,
+                 y_is_bot: Optional[torch.Tensor] = None,
+                 lambda_bot_loss: float = 0.5
 ) -> TransformerClassifier:
     """
     Supervised fine-tuning of the classifier using rule-based labels.
@@ -322,26 +1109,37 @@ def train_supervised_classifier(
     X_ts_train = X_ts[train_indices]
     X_fixed_train = X_fixed[train_indices]
     y_train = y_labels[train_indices]
+    y_is_bot_train = y_is_bot[train_indices] if y_is_bot is not None else None
     X_ts_val = X_ts[val_indices]
     X_fixed_val = X_fixed[val_indices]
     y_val = y_labels[val_indices]
+    y_is_bot_val = y_is_bot[val_indices] if y_is_bot is not None else None
     
     # Create datasets
-    train_dataset = torch.utils.data.TensorDataset(X_ts_train, X_fixed_train, y_train)
-    val_dataset = torch.utils.data.TensorDataset(X_ts_val, X_fixed_val, y_val)
+    if y_is_bot_train is not None:
+        train_dataset = torch.utils.data.TensorDataset(X_ts_train, X_fixed_train, y_train, y_is_bot_train)
+        val_dataset = torch.utils.data.TensorDataset(X_ts_val, X_fixed_val, y_val, y_is_bot_val)
+    else:
+        train_dataset = torch.utils.data.TensorDataset(X_ts_train, X_fixed_train, y_train)
+        val_dataset = torch.utils.data.TensorDataset(X_ts_val, X_fixed_val, y_val)
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
     # Loss function with class weights
     if class_weights is None:
-        criterion = nn.CrossEntropyLoss()
+        criterion_classification = nn.CrossEntropyLoss()
     else:
-        criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
+        criterion_classification = nn.CrossEntropyLoss(weight=class_weights.to(device))
+    
+    # Focal loss for bot head to handle class imbalance
+    if y_is_bot is not None:
+        criterion_bot = FocalLoss(alpha=FOCAL_LOSS_ALPHA, gamma=FOCAL_LOSS_GAMMA)  # Focal loss for better bot detection
     
     optimizer = optim.Adam(classifier.parameters(), lr=learning_rate)
     
     best_val_acc = 0.0
+    best_val_bot_f1 = 0.0 # Track F1 for bot head
     patience = 5
     patience_counter = 0
     
@@ -350,20 +1148,40 @@ def train_supervised_classifier(
         train_loss = 0.0
         train_correct = 0
         train_total = 0
+        train_bot_correct = 0
+        train_bot_total = 0
         
-        for ts_batch, fixed_batch, y_batch in train_loader:
+        for batch_data in train_loader:
+            if y_is_bot_train is not None:
+                ts_batch, fixed_batch, y_batch, y_is_bot_batch = batch_data
+                y_is_bot_batch = y_is_bot_batch.to(device)
+            else:
+                ts_batch, fixed_batch, y_batch = batch_data
+                y_is_bot_batch = None
+            
             ts_batch = ts_batch.to(device)
             fixed_batch = fixed_batch.to(device)
             y_batch = y_batch.to(device)
             
             optimizer.zero_grad()
-            logits = classifier(ts_batch, fixed_batch)
-            loss = criterion(logits, y_batch)
-            loss.backward()
+            classification_logits, bot_logits, _ = classifier(ts_batch, fixed_batch)
+            
+            loss_classification = criterion_classification(classification_logits, y_batch)
+            total_loss = loss_classification
+
+            if y_is_bot_batch is not None and bot_logits is not None:
+                loss_bot = criterion_bot(bot_logits, y_is_bot_batch)
+                total_loss += lambda_bot_loss * loss_bot
+                
+                _, predicted_bot = torch.max(bot_logits.data, 1)
+                train_bot_total += y_is_bot_batch.size(0)
+                train_bot_correct += (predicted_bot == y_is_bot_batch).sum().item()
+
+            total_loss.backward()
             optimizer.step()
             
-            train_loss += loss.item()
-            _, predicted = torch.max(logits.data, 1)
+            train_loss += total_loss.item()
+            _, predicted = torch.max(classification_logits.data, 1)
             train_total += y_batch.size(0)
             train_correct += (predicted == y_batch).sum().item()
         
@@ -372,17 +1190,42 @@ def train_supervised_classifier(
         val_loss = 0.0
         val_correct = 0
         val_total = 0
+        val_bot_correct = 0
+        val_bot_total = 0
+        val_bot_predictions = []
+        val_bot_targets = []
+
         with torch.no_grad():
-            for ts_batch, fixed_batch, y_batch in val_loader:
+            for batch_data_val in val_loader:
+                if y_is_bot_val is not None:
+                    ts_batch, fixed_batch, y_batch, y_is_bot_batch = batch_data_val
+                    y_is_bot_batch = y_is_bot_batch.to(device)
+                else:
+                    ts_batch, fixed_batch, y_batch = batch_data_val
+                    y_is_bot_batch = None
+
                 ts_batch = ts_batch.to(device)
                 fixed_batch = fixed_batch.to(device)
                 y_batch = y_batch.to(device)
                 
-                logits = classifier(ts_batch, fixed_batch)
-                loss = criterion(logits, y_batch)
-                val_loss += loss.item()
+                classification_logits, bot_logits, _ = classifier(ts_batch, fixed_batch)
                 
-                _, predicted = torch.max(logits.data, 1)
+                loss_classification = criterion_classification(classification_logits, y_batch)
+                total_loss = loss_classification
+
+                if y_is_bot_batch is not None and bot_logits is not None:
+                    loss_bot = criterion_bot(bot_logits, y_is_bot_batch)
+                    total_loss += lambda_bot_loss * loss_bot
+
+                    _, predicted_bot = torch.max(bot_logits.data, 1)
+                    val_bot_total += y_is_bot_batch.size(0)
+                    val_bot_correct += (predicted_bot == y_is_bot_batch).sum().item()
+                    val_bot_predictions.extend(predicted_bot.cpu().numpy())
+                    val_bot_targets.extend(y_is_bot_batch.cpu().numpy())
+
+                val_loss += total_loss.item()
+                
+                _, predicted = torch.max(classification_logits.data, 1)
                 val_total += y_batch.size(0)
                 val_correct += (predicted == y_batch).sum().item()
         
@@ -391,12 +1234,22 @@ def train_supervised_classifier(
         avg_train_loss = train_loss / len(train_loader) if len(train_loader) > 0 else 0.0
         avg_val_loss = val_loss / len(val_loader) if len(val_loader) > 0 else 0.0
         
+        train_bot_acc = train_bot_correct / train_bot_total if train_bot_total > 0 else 0.0
+        val_bot_acc = val_bot_correct / val_bot_total if val_bot_total > 0 else 0.0
+
+        # Calculate F1-score for bot head
+        val_bot_f1 = 0.0
+        if y_is_bot_val is not None and len(val_bot_targets) > 0:
+            from sklearn.metrics import f1_score
+            val_bot_f1 = f1_score(val_bot_targets, val_bot_predictions, average='binary', pos_label=1)
+
         if (epoch + 1) % 5 == 0:
-            logger.info(f"      Epoch {epoch+1}/{epochs}: Train Loss={avg_train_loss:.6f}, Train Acc={train_acc:.4f}, Val Loss={avg_val_loss:.6f}, Val Acc={val_acc:.4f}")
+            logger.info(f"      Epoch {epoch+1}/{epochs}: Train Loss={avg_train_loss:.6f}, Train Acc={train_acc:.4f} (Bot Acc={train_bot_acc:.4f}), Val Loss={avg_val_loss:.6f}, Val Acc={val_acc:.4f} (Bot Acc={val_bot_acc:.4f}, Bot F1={val_bot_f1:.4f})")
         
-        # Early stopping
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        # Early stopping based on overall validation accuracy OR bot F1
+        if val_acc > best_val_acc or val_bot_f1 > best_val_bot_f1: # Prioritize bot F1 if it's better
+            best_val_acc = max(val_acc, best_val_acc)
+            best_val_bot_f1 = max(val_bot_f1, best_val_bot_f1)
             patience_counter = 0
         else:
             patience_counter += 1
@@ -404,7 +1257,7 @@ def train_supervised_classifier(
                 logger.info(f"      Early stopping at epoch {epoch+1}")
                 break
     
-    logger.info(f"    Supervised fine-tuning completed. Best validation accuracy: {best_val_acc:.4f}")
+    logger.info(f"    Supervised fine-tuning completed. Best validation accuracy: {best_val_acc:.4f}, Best Bot F1: {best_val_bot_f1:.4f}")
     return classifier
 
 
@@ -416,14 +1269,22 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                               pretrain_learning_rate: float = 1e-4,
                               enable_neural_classification: bool = True,
                               finetune_epochs: int = 30, finetune_batch_size: int = 256,
-                              finetune_learning_rate: float = 1e-4) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                              finetune_learning_rate: float = 1e-4,
+                              enable_bot_head: bool = True,
+                              lambda_bot_loss: float = 1.5,
+                              enable_stratified_processing: bool = True,
+                              enable_scale_aware_anomaly: bool = True,
+                              enable_bot_likelihood: bool = True,
+                              enable_confidence_classification: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Classify locations using deep architecture: Isolation Forest + Transformers.
     
     This method combines:
-    1. Isolation Forest for initial anomaly detection
-    2. Transformers for sequence-based feature encoding
-    3. Direct classification using Transformer embeddings + fixed features
+    1. Stratified pre-filtering (separate obvious bots/legitimate from uncertain)
+    2. Scale-aware Isolation Forest for anomaly detection
+    3. Bot likelihood scoring for enhanced pattern detection
+    4. Transformers for sequence-based feature encoding
+    5. Confidence-based classification with fallback strategies
     
     The Transformer processes time-series features to create rich embeddings,
     which are combined with fixed features for rule-based classification.
@@ -451,20 +1312,123 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         finetune_epochs: Number of epochs for supervised fine-tuning (default: 30)
         finetune_batch_size: Batch size for fine-tuning (default: 256)
         finetune_learning_rate: Learning rate for fine-tuning (default: 1e-4)
+        lambda_bot_loss: Weight for bot detection loss (default: 1.5, increased for better bot detection)
+        enable_stratified_processing: Whether to use stratified pre-filtering (default: True)
+        enable_scale_aware_anomaly: Whether to use scale-aware anomaly detection (default: True)
+        enable_bot_likelihood: Whether to compute bot likelihood scores (default: True)
+        enable_confidence_classification: Whether to use confidence-based classification (default: True)
     
     Returns:
         Tuple of (DataFrame with classification columns added, empty cluster_df for compatibility)
     """
     logger.info("Training deep architecture classifier (Isolation Forest + Transformers)...")
     
-    # Step 1: Isolation Forest for initial anomaly detection
-    logger.info("  Step 1/2: Running Isolation Forest for anomaly detection...")
-    predictions, scores, _, _ = train_isolation_forest(
-        df, feature_columns, contamination=contamination
-    )
-    df['is_anomaly'] = predictions == -1
-    df['anomaly_score'] = -scores
-    logger.info(f"    Detected {df['is_anomaly'].sum():,} anomalous locations")
+    # Initialize classification columns
+    df['user_category'] = 'normal'
+    df['is_bot'] = False
+    df['is_download_hub'] = False
+    df['classification_confidence'] = 0.0
+    df['needs_review'] = False
+    
+    # =========================================================================
+    # Phase 6 Enhancement: Stratified Pre-filtering
+    # =========================================================================
+    obvious_bots_mask = pd.Series(False, index=df.index)
+    obvious_legitimate_mask = pd.Series(False, index=df.index)
+    uncertain_mask = pd.Series(True, index=df.index)
+    
+    if enable_stratified_processing:
+        logger.info("  Step 0: Stratified pre-filtering (Phase 6 enhancement)...")
+        obvious_bots_mask, obvious_legitimate_mask, uncertain_mask = stratified_prefilter(df)
+        
+        # Classify obvious cases immediately
+        df.loc[obvious_bots_mask, 'user_category'] = 'bot'
+        df.loc[obvious_bots_mask, 'is_bot'] = True
+        df.loc[obvious_bots_mask, 'classification_confidence'] = 0.95
+        
+        df.loc[obvious_legitimate_mask, 'user_category'] = 'independent_user'
+        df.loc[obvious_legitimate_mask, 'classification_confidence'] = 0.90
+        
+        # Only process uncertain cases with deep learning
+        if not uncertain_mask.any():
+            logger.info("  All locations classified by pre-filtering. Skipping deep learning.")
+            cluster_df = pd.DataFrame()
+            df['is_download_hub'] = df['user_category'] == 'download_hub'
+            df['is_independent_user'] = df['user_category'] == 'independent_user'
+            df['is_normal_user'] = df['user_category'] == 'normal'
+            return df, cluster_df
+        
+        logger.info(f"  Processing {uncertain_mask.sum():,} uncertain locations with deep learning...")
+    
+    # Get subset for deep learning (uncertain cases only if stratified processing enabled)
+    if enable_stratified_processing:
+        df_uncertain = df[uncertain_mask].copy()
+        uncertain_indices = df[uncertain_mask].index
+    else:
+        df_uncertain = df.copy()
+        uncertain_indices = df.index
+    
+    # =========================================================================
+    # Step 1: Anomaly Detection (Scale-aware or Standard)
+    # =========================================================================
+    if enable_scale_aware_anomaly and enable_stratified_processing:
+        logger.info("  Step 1/3: Running scale-aware anomaly detection (Phase 6 enhancement)...")
+        predictions, scores = scale_aware_anomaly_detection(
+            df_uncertain, feature_columns, contamination=contamination
+        )
+        df_uncertain['is_anomaly'] = predictions == -1
+        df_uncertain['anomaly_score'] = scores
+    else:
+        logger.info("  Step 1/3: Running standard Isolation Forest for anomaly detection...")
+        predictions, scores, _, _ = train_isolation_forest(
+            df_uncertain, feature_columns, contamination=contamination
+        )
+        df_uncertain['is_anomaly'] = predictions == -1
+        df_uncertain['anomaly_score'] = -scores
+    
+    logger.info(f"    Detected {df_uncertain['is_anomaly'].sum():,} anomalous locations")
+    
+    # Copy anomaly results back to main dataframe
+    df.loc[uncertain_indices, 'is_anomaly'] = df_uncertain['is_anomaly'].values
+    df.loc[uncertain_indices, 'anomaly_score'] = df_uncertain['anomaly_score'].values
+    
+    # =========================================================================
+    # Phase 6 Enhancement: Bot Likelihood Scoring
+    # =========================================================================
+    if enable_bot_likelihood:
+        logger.info("  Computing bot likelihood scores (Phase 6 enhancement)...")
+        bot_likelihood = compute_bot_likelihood_score(df_uncertain)
+        df_uncertain['bot_likelihood_score'] = bot_likelihood
+        df.loc[uncertain_indices, 'bot_likelihood_score'] = bot_likelihood
+        
+        # Use bot likelihood for high-confidence classifications
+        high_likelihood_threshold = 8.0
+        low_likelihood_threshold = 2.0
+        
+        high_likelihood_bots = bot_likelihood > high_likelihood_threshold
+        low_likelihood = bot_likelihood < low_likelihood_threshold
+        
+        logger.info(f"    High bot likelihood (>{high_likelihood_threshold}): {high_likelihood_bots.sum():,}")
+        logger.info(f"    Low bot likelihood (<{low_likelihood_threshold}): {low_likelihood.sum():,}")
+        
+        # Mark high-likelihood as bots with high confidence
+        if high_likelihood_bots.any():
+            high_likelihood_indices = uncertain_indices[high_likelihood_bots]
+            df.loc[high_likelihood_indices, 'user_category'] = 'bot'
+            df.loc[high_likelihood_indices, 'is_bot'] = True
+            df.loc[high_likelihood_indices, 'classification_confidence'] = 0.85
+    
+    # Add interaction features for better bot detection
+    logger.info("  Adding bot interaction features...")
+    df = add_bot_interaction_features(df)
+    
+    # Add new features to feature columns if they exist
+    new_features = ['dl_user_per_log_users', 'user_scarcity_score', 
+                   'download_concentration', 'bot_composite_score',
+                   'anomaly_dl_interaction', 'temporal_irregularity']
+    for feat in new_features:
+        if feat in df.columns and feat not in feature_columns:
+            feature_columns.append(feat)
     
     # Prepare features for Transformer
     # Use time_series_features if available, otherwise fallback to flat features
@@ -477,29 +1441,36 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             logger.warning(f"  Max sequence length found ({max_seq_len}) is less than requested ({sequence_length}). Padding with zeros.")
         
         # Determine num_features_per_window from the first valid entry
-        first_valid_ts = df['time_series_features'].dropna().iloc[0]
-        num_features_per_window = len(first_valid_ts[0]) if len(first_valid_ts) > 0 else 0
-
-        if num_features_per_window == 0:
-            logger.warning("  No features found in time_series_features. Falling back to flat features.")
+        valid_ts = df['time_series_features'].dropna()
+        if len(valid_ts) == 0:
+            logger.warning("  No valid time-series features found. Falling back to flat features.")
             X_ts = df[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns))
             sequence_length = 1
             num_features_per_window = len(feature_columns)
         else:
-            X_ts_list = []
-            for ts_list in df['time_series_features']:
-                if isinstance(ts_list, list):
-                    # Pad or truncate to desired sequence_length
-                    if len(ts_list) < sequence_length:
-                        padded_ts = [[0.0] * num_features_per_window] * (sequence_length - len(ts_list)) + ts_list
-                    elif len(ts_list) > sequence_length:
-                        padded_ts = ts_list[-sequence_length:]
+            first_valid_ts = valid_ts.iloc[0]
+            num_features_per_window = len(first_valid_ts[0]) if len(first_valid_ts) > 0 else 0
+
+            if num_features_per_window == 0:
+                logger.warning("  No features found in time_series_features. Falling back to flat features.")
+                X_ts = df[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns))
+                sequence_length = 1
+                num_features_per_window = len(feature_columns)
+            else:
+                X_ts_list = []
+                for ts_list in df['time_series_features']:
+                    if isinstance(ts_list, list):
+                        # Pad or truncate to desired sequence_length
+                        if len(ts_list) < sequence_length:
+                            padded_ts = [[0.0] * num_features_per_window] * (sequence_length - len(ts_list)) + ts_list
+                        elif len(ts_list) > sequence_length:
+                            padded_ts = ts_list[-sequence_length:]
+                        else:
+                            padded_ts = ts_list
+                        X_ts_list.append(padded_ts)
                     else:
-                        padded_ts = ts_list
-                    X_ts_list.append(padded_ts)
-                else:
-                    X_ts_list.append([[0.0] * num_features_per_window] * sequence_length)
-            X_ts = np.array(X_ts_list)
+                        X_ts_list.append([[0.0] * num_features_per_window] * sequence_length)
+                X_ts = np.array(X_ts_list)
     else:
         logger.info("  Time-series features not available or empty, falling back to flat features.")
         X_ts = df[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns)) # Reshape flat features as sequence length 1
@@ -507,8 +1478,8 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         num_features_per_window = len(feature_columns)
 
     # Step 2: Transformer-based feature encoding (no clustering)
-    transformer_embeddings = None
     neural_predictions = None
+    bot_predictions = None
     if use_transformer:
         logger.info("  Step 2/2: Encoding features with Transformer...")
         try:
@@ -538,7 +1509,8 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 d_model=128,
                 nhead=8,
                 num_layers=3,
-                enable_reconstruction=enable_self_supervised
+                enable_reconstruction=enable_self_supervised,
+                enable_bot_head=enable_bot_head
             ).to(device)
             
             X_tensor = X_tensor.to(device)
@@ -560,8 +1532,15 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 )
             
             # Generate rule-based labels for training (pseudo-labels)
-            logger.info("    Generating rule-based labels for training...")
+            logger.info("    Generating rule-based labels for classification training...")
             rule_labels = _generate_rule_based_labels(df)
+
+            # Generate SMART bot labels for multi-task learning
+            logger.info("    Generating smart 'is_bot' labels for multi-task training...")
+            # Use smart labels that capture nuanced bot patterns
+            hard_bot_labels, _ = generate_smart_bot_labels(df)
+            is_bot_labels = hard_bot_labels  # Use hard labels for training
+
             
             # Supervised fine-tuning (if enabled)
             if enable_neural_classification:
@@ -571,6 +1550,7 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 
                 # Convert labels to tensor
                 y_labels = torch.LongTensor(rule_labels).to(device)
+                y_is_bot_labels = torch.LongTensor(is_bot_labels).to(device)
                 
                 # Calculate class weights for imbalanced data
                 unique_labels, counts = np.unique(rule_labels, return_counts=True)
@@ -589,7 +1569,9 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                     epochs=finetune_epochs,
                     batch_size=finetune_batch_size,
                     learning_rate=finetune_learning_rate,
-                    class_weights=class_weights
+                    class_weights=class_weights,
+                    y_is_bot=y_is_bot_labels,
+                    lambda_bot_loss=lambda_bot_loss
                 )
             
             # Forward pass to get predictions
@@ -597,17 +1579,22 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             with torch.no_grad():
                 if enable_neural_classification:
                     # Get neural predictions
-                    logits = classifier(X_tensor, X_fixed_tensor)
+                    logits, bot_logits, _ = classifier(X_tensor, X_fixed_tensor)
                     _, predicted_classes = torch.max(logits, 1)
                     neural_predictions = predicted_classes.cpu().numpy()
+                    if enable_bot_head:
+                        _, predicted_bot_classes = torch.max(bot_logits, 1)
+                        bot_predictions = predicted_bot_classes.cpu().numpy()
+                    else:
+                        bot_predictions = None
                 else:
                     # Extract embeddings for rule-based classification
-                    ts_proj = classifier.ts_input_projection(X_tensor)
-                    ts_encoded = classifier.transformer(ts_proj)
-                    ts_pooled = ts_encoded.mean(dim=1).cpu().numpy()
-                    fixed_proj = classifier.fixed_projection(X_fixed_tensor).cpu().numpy()
-                    transformer_embeddings = np.concatenate([ts_pooled, fixed_proj], axis=1)
+                    # Note: Embeddings computed here could be used for future enhancements
+                    # (e.g., clustering, similarity search, visualization)
+                    _ = classifier.ts_input_projection(X_tensor)
+                    _ = classifier.fixed_projection(X_fixed_tensor)
                     neural_predictions = None
+                    bot_predictions = None  # No bot predictions if not neural classification
             
             logger.info(f"    Transformer processing completed")
             
@@ -615,6 +1602,7 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             logger.warning(f"    Transformer encoding failed ({e}), using original features for classification")
             use_transformer = False
             neural_predictions = None
+            bot_predictions = None
     
     # Create empty cluster_df for compatibility (no clustering anymore)
     cluster_df = pd.DataFrame()
@@ -635,16 +1623,149 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     if 'working_hours_ratio' not in df.columns:
         df['working_hours_ratio'] = 0.0
     
-    # Classify using neural predictions or rule-based
+    # =========================================================================
+    # Classification with Proper Category Separation (Phase 6 Fix)
+    # =========================================================================
+    # 
+    # KEY INSIGHT: Bots and Download Hubs have OPPOSITE patterns:
+    #   - BOTS: Many users (>1000), low-moderate DL/user (<50), coordinated 
+    #   - HUBS: Few users (<100), VERY high DL/user (>500), legitimate mirrors
+    #
+    # The bot head should NEVER override download hub classifications!
+    # =========================================================================
+    
+    category_map = {0: 'bot', 1: 'download_hub', 2: 'independent_user', 3: 'normal', 4: 'other'}
+    
+    # =========================================================================
+    # Step 1: First, identify CLEAR download hubs BEFORE any neural classification
+    # These should NEVER be classified as bots
+    # =========================================================================
+    logger.info("    Step 1: Identifying download hubs (protected from bot override)...")
+    
+    download_hub_mask = pd.Series(False, index=df.index)
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users', 'total_downloads'):
+        # Pattern 1: Very high DL/user with few users (mirrors, institutional)
+        hub_pattern_mirror = (
+            (df['downloads_per_user'] > 500) & 
+            (df['unique_users'] < 100)
+        )
+        
+        # Pattern 2: High total downloads with moderate DL/user and regular working hours
+        hub_pattern_institution = (
+            (df['total_downloads'] > 100000) & 
+            (df['downloads_per_user'] > 50) & 
+            (df['downloads_per_user'] < 500) &
+            (df['unique_users'] < 500)
+        )
+        if 'working_hours_ratio' in df.columns:
+            hub_pattern_institution = hub_pattern_institution & (df['working_hours_ratio'] > 0.25)
+        
+        # Pattern 3: Extreme DL/user (automated sync, data mirrors)
+        hub_pattern_extreme = (
+            (df['downloads_per_user'] > 1000)
+        )
+        
+        download_hub_mask = hub_pattern_mirror | hub_pattern_institution | hub_pattern_extreme
+        
+        n_hubs_detected = download_hub_mask.sum()
+        logger.info(f"      Detected {n_hubs_detected:,} download hub locations (protected)")
+        
+        # Pre-classify hubs - these will NOT be overridden by bot head
+        df.loc[download_hub_mask, 'user_category'] = 'download_hub'
+        df.loc[download_hub_mask, 'is_protected_hub'] = True
+    
+    # =========================================================================
+    # Step 2: Apply neural classification to non-hub locations
+    # =========================================================================
     if enable_neural_classification and neural_predictions is not None:
-        logger.info("    Using neural classification predictions...")
-        # Map neural predictions to categories
-        category_map = {0: 'bot', 1: 'download_hub', 2: 'independent_user', 3: 'normal', 4: 'other'}
-        df['user_category'] = [category_map[pred] for pred in neural_predictions]
+        logger.info("    Step 2: Applying neural classification...")
+        
+        # Only apply neural predictions to non-hub locations
+        non_hub_mask = ~download_hub_mask
+        
+        if enable_confidence_classification and use_transformer:
+            logger.info("    Applying confidence-based classification (Phase 6 enhancement)...")
+            try:
+                classifier.eval()
+                with torch.no_grad():
+                    logits, bot_logits_conf, _ = classifier(X_tensor, X_fixed_tensor)
+                
+                # Apply confidence-based classification only to non-hub locations
+                df_temp = confidence_based_classification(
+                    df.copy(), logits, bot_logits_conf, category_map
+                )
+                # Copy results only for non-hub locations
+                df.loc[non_hub_mask, 'user_category'] = df_temp.loc[non_hub_mask, 'user_category']
+                if 'classification_confidence' in df_temp.columns:
+                    df.loc[non_hub_mask, 'classification_confidence'] = df_temp.loc[non_hub_mask, 'classification_confidence']
+                if 'needs_review' in df_temp.columns:
+                    df.loc[non_hub_mask, 'needs_review'] = df_temp.loc[non_hub_mask, 'needs_review']
+            except Exception as e:
+                logger.warning(f"    Confidence-based classification failed ({e}), using standard predictions")
+                for i, pred in enumerate(neural_predictions):
+                    if non_hub_mask.iloc[i]:
+                        df.iloc[i, df.columns.get_loc('user_category')] = category_map[pred]
+        else:
+            # Standard neural predictions (only for non-hubs)
+            for i, pred in enumerate(neural_predictions):
+                if non_hub_mask.iloc[i]:
+                    df.iloc[i, df.columns.get_loc('user_category')] = category_map[pred]
+        
+        # =========================================================================
+        # Step 3: Bot head override - BUT ONLY for non-hub locations
+        # =========================================================================
+        if enable_bot_head and bot_predictions is not None:
+            df['is_bot_neural'] = bot_predictions == 1
+            
+            # Bot head override ONLY for non-hub locations with BOT patterns
+            # Key criteria for bots: Many users, low-moderate DL/user
+            bot_head_bots = (
+                (bot_predictions == 1) & 
+                ~download_hub_mask &  # NOT a download hub
+                (df['unique_users'] > 100) &  # Bots have many users
+                (df['downloads_per_user'] < 100)  # Bots have low-moderate DL/user
+            )
+            
+            if bot_head_bots.any():
+                logger.info(f"    Bot head override (filtered): {bot_head_bots.sum():,} locations marked as bots")
+                df.loc[bot_head_bots, 'user_category'] = 'bot'
+            
+        # Apply post-processing overrides for obvious bot patterns
+        logger.info("    Applying post-processing bot detection overrides...")
+        df = apply_bot_detection_override(df)
+        
+        # Anomaly-guided classification for edge cases (excluding hubs)
+        if 'anomaly_score' in df.columns:
+            logger.info("    Applying anomaly-guided classification...")
+            high_anomaly = df['anomaly_score'] > 0.25
+            moderate_users = (df['unique_users'] > 5000) & (df['unique_users'] < 15000)
+            moderate_dl = (df['downloads_per_user'] > 15) & (df['downloads_per_user'] < 50)
+            
+            suspicious_bot_pattern = (
+                high_anomaly & 
+                moderate_users & 
+                moderate_dl & 
+                ~download_hub_mask &  # NOT a download hub
+                (df['user_category'] != 'bot')
+            )
+            
+            if suspicious_bot_pattern.any():
+                logger.info(f"    Anomaly-guided override: reclassifying {suspicious_bot_pattern.sum()} "
+                          f"suspicious locations as bots")
+                df.loc[suspicious_bot_pattern, 'user_category'] = 'bot'
+                if 'is_bot_neural' in df.columns:
+                    df.loc[suspicious_bot_pattern, 'is_bot_neural'] = True
     else:
         logger.info("    Using rule-based classification...")
-        # Fallback to rule-based classification
         df = _apply_rule_based_classification(df)
+    
+    # =========================================================================
+    # Merge stratified pre-filter results back
+    # =========================================================================
+    if enable_stratified_processing:
+        # Ensure pre-filtered classifications are preserved
+        df.loc[obvious_bots_mask, 'user_category'] = 'bot'
+        df.loc[obvious_legitimate_mask, 'user_category'] = 'independent_user'
     
     # Set boolean flags based on category
     df['is_bot'] = df['user_category'] == 'bot'
@@ -658,14 +1779,23 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     n_independent = df['is_independent_user'].sum()
     n_normal = df['is_normal_user'].sum()
     n_other = (df['user_category'] == 'other').sum()
+    n_needs_review = df['needs_review'].sum() if 'needs_review' in df.columns else 0
     
-    method_name = "Neural" if enable_neural_classification else "Rule-based"
+    method_name = "Neural + Phase 6" if enable_neural_classification else "Rule-based"
     logger.info(f"\n  Final Classification (Transformer + {method_name}):")
     logger.info(f"    Bot locations: {n_bots:,} ({n_bots/len(df)*100:.1f}%)")
     logger.info(f"    Hub locations: {n_hubs:,} ({n_hubs/len(df)*100:.1f}%)")
     logger.info(f"    Independent User locations: {n_independent:,} ({n_independent/len(df)*100:.1f}%)")
     logger.info(f"    Normal locations: {n_normal:,} ({n_normal/len(df)*100:.1f}%)")
     logger.info(f"    Other/Unclassified locations: {n_other:,} ({n_other/len(df)*100:.1f}%)")
+    if n_needs_review > 0:
+        logger.info(f"    Locations needing review: {n_needs_review:,} ({n_needs_review/len(df)*100:.1f}%)")
+    
+    if enable_stratified_processing:
+        logger.info(f"\n  Stratified Processing Summary:")
+        logger.info(f"    Pre-filtered as bots: {obvious_bots_mask.sum():,}")
+        logger.info(f"    Pre-filtered as legitimate: {obvious_legitimate_mask.sum():,}")
+        logger.info(f"    Processed by deep learning: {uncertain_mask.sum():,}")
     
     return df, cluster_df
 
