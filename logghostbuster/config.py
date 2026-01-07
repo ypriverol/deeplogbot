@@ -129,8 +129,8 @@ def get_bot_thresholds() -> dict:
 
 
 def get_category_rules() -> dict:
-    """Get detailed category classification rules from config."""
-    default_categories = {
+    """Get category detection rules from config."""
+    return get_classification_config().get('categories', {
         'ci_cd_pipeline': {
             'max_users': 10,
             'min_downloads_per_user': 50,
@@ -149,7 +149,7 @@ def get_category_rules() -> dict:
         'bulk_downloader': {
             'max_users': 5,
             'min_downloads_per_user': 100,
-            'max_downloads_per_user': 500,
+            'max_downloads_per_user': 1000,
         },
         'course_workshop': {
             'min_users': 50,
@@ -158,17 +158,4 @@ def get_category_rules() -> dict:
             'max_downloads_per_user': 20,
             'max_file_diversity_ratio': 0.3,
         },
-        'automated_sync': {
-            'max_users': 3,
-            'min_downloads_per_user': 500,
-            'min_regularity_score': 1.0,
-        },
-        'api_client': {
-            'min_users': 10,
-            'max_users': 500,
-            'min_downloads_per_user': 5,
-            'max_downloads_per_user': 50,
-            'min_working_hours_ratio': 0.4,
-        },
-    }
-    return get_classification_config().get('categories', default_categories)
+    })

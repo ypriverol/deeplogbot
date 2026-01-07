@@ -3129,6 +3129,12 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         df.loc[final_hub_override, 'is_download_hub'] = True
         df.loc[final_hub_override, 'user_category'] = 'download_hub'
 
+    # =========================================================================
+    # Detailed Category Classification
+    # =========================================================================
+    logger.info("    Classifying detailed categories...")
+    df = _classify_detailed_categories(df)
+
     # Log results
     n_bots = df['is_bot'].sum()
     n_hubs = df['is_download_hub'].sum()
@@ -3749,5 +3755,105 @@ def _apply_rule_based_classification(df: pd.DataFrame) -> pd.DataFrame:
     # 4. Other
     other_mask = df['is_anomaly'] & (df['user_category'] == 'normal')
     df.loc[other_mask, 'user_category'] = 'other'
+    
+    return df
+
+
+def _classify_detailed_categories(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Classify locations into detailed categories beyond bot/hub/normal.
+    
+    New categories:
+    - ci_cd_pipeline: Automated testing/build systems
+    - research_group: Small teams of researchers
+    - bulk_downloader: Individual heavy downloaders
+    - course_workshop: Educational events
+    
+    Args:
+        df: DataFrame with features including behavioral features
+        
+    Returns:
+        DataFrame with 'detailed_category' column added
+    """
+    from ...config import get_category_rules
+    
+    rules = get_category_rules()
+    
+    # Initialize detailed_category with current user_category
+    # This preserves existing classifications (bot, hub, independent_user)
+    if 'user_category' in df.columns:
+        df['detailed_category'] = df['user_category']
+    else:
+        df['detailed_category'] = 'unclassified'
+    
+    # Only reclassify locations that are 'normal', 'other', or 'unclassified'
+    # Don't override bot, hub, or independent_user classifications
+    reclassify_mask = df['detailed_category'].isin(['normal', 'other', 'unclassified'])
+    
+    # 1. CI/CD Pipeline Detection
+    ci_cd_rules = rules.get('ci_cd_pipeline', {})
+    ci_cd_mask = reclassify_mask & (
+        (df['unique_users'] <= ci_cd_rules.get('max_users', 10)) &
+        (df['downloads_per_user'] >= ci_cd_rules.get('min_downloads_per_user', 50)) &
+        (df['downloads_per_user'] <= ci_cd_rules.get('max_downloads_per_user', 500))
+    )
+    # Add behavioral features if available
+    if 'file_diversity_ratio' in df.columns:
+        ci_cd_mask = ci_cd_mask & (
+            df['file_diversity_ratio'] <= ci_cd_rules.get('max_file_diversity_ratio', 0.3)
+        )
+    if 'regularity_score' in df.columns:
+        ci_cd_mask = ci_cd_mask & (
+            df['regularity_score'] >= ci_cd_rules.get('min_regularity_score', 0.8)
+        )
+    df.loc[ci_cd_mask, 'detailed_category'] = 'ci_cd_pipeline'
+    
+    # 2. Research Group Detection
+    research_rules = rules.get('research_group', {})
+    research_mask = reclassify_mask & ~ci_cd_mask & (
+        (df['unique_users'] >= research_rules.get('min_users', 5)) &
+        (df['unique_users'] <= research_rules.get('max_users', 50)) &
+        (df['downloads_per_user'] >= research_rules.get('min_downloads_per_user', 10)) &
+        (df['downloads_per_user'] <= research_rules.get('max_downloads_per_user', 100))
+    )
+    if 'working_hours_ratio' in df.columns:
+        research_mask = research_mask & (
+            df['working_hours_ratio'] >= research_rules.get('min_working_hours_ratio', 0.5)
+        )
+    if 'file_diversity_ratio' in df.columns:
+        research_mask = research_mask & (
+            df['file_diversity_ratio'] >= research_rules.get('min_file_diversity_ratio', 0.3)
+        )
+    df.loc[research_mask, 'detailed_category'] = 'research_group'
+    
+    # 3. Bulk Downloader Detection
+    bulk_rules = rules.get('bulk_downloader', {})
+    bulk_mask = reclassify_mask & ~ci_cd_mask & ~research_mask & (
+        (df['unique_users'] <= bulk_rules.get('max_users', 5)) &
+        (df['downloads_per_user'] >= bulk_rules.get('min_downloads_per_user', 100)) &
+        (df['downloads_per_user'] <= bulk_rules.get('max_downloads_per_user', 1000))
+    )
+    df.loc[bulk_mask, 'detailed_category'] = 'bulk_downloader'
+    
+    # 4. Course/Workshop Detection
+    course_rules = rules.get('course_workshop', {})
+    course_mask = reclassify_mask & ~ci_cd_mask & ~research_mask & ~bulk_mask & (
+        (df['unique_users'] >= course_rules.get('min_users', 50)) &
+        (df['unique_users'] <= course_rules.get('max_users', 500)) &
+        (df['downloads_per_user'] >= course_rules.get('min_downloads_per_user', 5)) &
+        (df['downloads_per_user'] <= course_rules.get('max_downloads_per_user', 20))
+    )
+    if 'file_diversity_ratio' in df.columns:
+        course_mask = course_mask & (
+            df['file_diversity_ratio'] <= course_rules.get('max_file_diversity_ratio', 0.3)
+        )
+    df.loc[course_mask, 'detailed_category'] = 'course_workshop'
+    
+    # Log results
+    logger.info("Detailed category classification:")
+    for cat in ['ci_cd_pipeline', 'research_group', 'bulk_downloader', 'course_workshop']:
+        count = (df['detailed_category'] == cat).sum()
+        if count > 0:
+            logger.info(f"  {cat}: {count:,} locations")
     
     return df
