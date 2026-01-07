@@ -1115,7 +1115,21 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
     # Initialize bot score (0-1)
     bot_score = np.zeros(len(df))
     
-    # First, identify download hubs - these should NEVER get bot labels
+    # =========================================================================
+    # STRICTER HUB PROTECTION: Force hub classification (NEVER classify as bot)
+    # =========================================================================
+    is_definite_hub = pd.Series(False, index=df.index)
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        is_definite_hub = (
+            (df['downloads_per_user'] > 500) |  # Very high DL/user = always hub
+            ((df['unique_users'] <= 100) & (df['downloads_per_user'] > 100)) |  # Small + high DL/user
+            ((df['unique_users'] == 1) & (df['downloads_per_user'] > 50))  # Single user + moderate DL
+        )
+    
+    # Ensure definite hubs get zero bot score (apply BEFORE any bot scoring)
+    bot_score[is_definite_hub.values] = 0.0
+    
+    # Also keep backward compatibility with old hub identification
     is_download_hub = pd.Series(False, index=df.index)
     if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
         # Hub pattern: Very high DL/user with few users
@@ -1123,6 +1137,9 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
             ((df['downloads_per_user'] > 500) & (df['unique_users'] < 100)) |
             (df['downloads_per_user'] > 1000)  # Extreme DL/user is always a hub
         )
+    
+    # Merge both hub identifications
+    is_hub = is_definite_hub | is_download_hub
     
     # =========================================================================
     # BOT SIGNALS: Focus on MANY users + low-moderate DL/user
@@ -1134,7 +1151,7 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
         many_users_low_dl = (
             (df['unique_users'] > 1000) &  # Many users
             (df['downloads_per_user'] < 20) &  # Low DL/user
-            ~is_download_hub  # NOT a hub
+            ~is_hub  # NOT a hub
         )
         bot_score[many_users_low_dl] += 0.7
         
@@ -1143,7 +1160,7 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
             (df['unique_users'] > 5000) &  # Very many users
             (df['downloads_per_user'] >= 20) &
             (df['downloads_per_user'] < 100) &  # Moderate DL/user
-            ~is_download_hub
+            ~is_hub
         )
         bot_score[very_many_users_moderate_dl] += 0.6
         
@@ -1153,14 +1170,14 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
             (df['unique_users'] <= 5000) &
             (df['downloads_per_user'] > 10) &
             (df['downloads_per_user'] < 50) &
-            ~is_download_hub
+            ~is_hub
         )
         bot_score[moderate_users_suspicious] += 0.4
     
     # Signal 2: High anomaly score (only for non-hubs)
     if 'anomaly_score' in df.columns:
-        high_anomaly_non_hub = (df['anomaly_score'] > BOT_THRESHOLDS['HIGH_ANOMALY_SCORE']) & ~is_download_hub
-        very_high_anomaly_non_hub = (df['anomaly_score'] > BOT_THRESHOLDS['VERY_HIGH_ANOMALY_SCORE']) & ~is_download_hub
+        high_anomaly_non_hub = (df['anomaly_score'] > BOT_THRESHOLDS['HIGH_ANOMALY_SCORE']) & ~is_hub
+        very_high_anomaly_non_hub = (df['anomaly_score'] > BOT_THRESHOLDS['VERY_HIGH_ANOMALY_SCORE']) & ~is_hub
         bot_score[high_anomaly_non_hub] += 0.2
         bot_score[very_high_anomaly_non_hub] += 0.15
     
@@ -1170,7 +1187,7 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
             (df['working_hours_ratio'] < BOT_THRESHOLDS['LOW_WORKING_HOURS_RATIO']) &
             (df['total_downloads'] > BOT_THRESHOLDS['MIN_TOTAL_DOWNLOADS']) &
             (df['unique_users'] > 100) &  # Bots have many users
-            ~is_download_hub
+            ~is_hub
         )
         bot_score[non_working_high_activity] += 0.25
     
@@ -1179,14 +1196,14 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
         low_entropy_many_users = (
             (df['hourly_entropy'] < df['hourly_entropy'].quantile(BOT_THRESHOLDS['LOW_ENTROPY_QUANTILE'])) &
             (df['unique_users'] > 100) &  # Bots have many users
-            ~is_download_hub
+            ~is_hub
         )
         bot_score[low_entropy_many_users] += 0.15
     
     # Signal 5: Original rule-based bot classification (only for bots, NOT hubs)
     if 'user_category' in df.columns:
         rule_bot = df['user_category'] == 'bot'
-        bot_score[rule_bot & ~is_download_hub] += 0.5
+        bot_score[rule_bot & ~is_hub] += 0.5
         # NOTE: We do NOT add score for hubs anymore!
     
     # =========================================================================
@@ -1203,8 +1220,8 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
     # Normalize to [0, 1]
     bot_score = np.clip(bot_score, 0, 1)
     
-    # Force hubs to have zero bot score
-    bot_score[is_download_hub.values] = 0.0
+    # Force all hubs (both definite and old detection) to have zero bot score
+    bot_score[is_hub.values] = 0.0
     
     # Create both soft and hard labels
     soft_labels = bot_score
@@ -1217,13 +1234,64 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
     hard_labels = (bot_score >= threshold).astype(float)
     
     logger.info(f"    Smart bot label statistics:")
-    logger.info(f"      - Download hubs excluded: {is_download_hub.sum()}")
+    logger.info(f"      - Definite hubs excluded: {is_definite_hub.sum()}")
+    logger.info(f"      - Total hubs excluded: {is_hub.sum()}")
     logger.info(f"      - Locations with bot score > 0: {(bot_score > 0).sum()}")
     logger.info(f"      - Locations with bot score > 0.5: {(bot_score > 0.5).sum()}")
     logger.info(f"      - Threshold used: {threshold:.3f}")
     logger.info(f"      - Hard bot labels: {hard_labels.sum()}")
     
     return hard_labels, soft_labels
+
+
+def _apply_hub_protection(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply strict hub protection rules.
+    
+    Definite hub patterns - these should NEVER be classified as bots.
+    This function ensures that locations with clear hub characteristics
+    are protected from any bot classification.
+    
+    Args:
+        df: DataFrame with location features
+        
+    Returns:
+        DataFrame with hub protection applied
+    """
+    # Initialize is_protected_hub column if not exists
+    if 'is_protected_hub' not in df.columns:
+        df['is_protected_hub'] = False
+    
+    # Definite hub patterns - these should NEVER be classified as bots
+    definite_hub_mask = pd.Series(False, index=df.index)
+    
+    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        definite_hub_mask = (
+            # Very high DL/user (institutional mirrors)
+            (df['downloads_per_user'] > 500) |
+            # Few users with high DL/user (research labs, automated systems)
+            ((df['unique_users'] <= 100) & (df['downloads_per_user'] > 100)) |
+            # Single user with moderate+ DL/user (individual heavy downloaders)
+            ((df['unique_users'] == 1) & (df['downloads_per_user'] > 50)) |
+            # Very few users (≤10) with high activity
+            ((df['unique_users'] <= 10) & (df['downloads_per_user'] > 200))
+        )
+    
+    # Mark as protected hub
+    df.loc[definite_hub_mask, 'is_protected_hub'] = True
+    
+    # Override any bot classification
+    if 'is_bot' in df.columns:
+        df.loc[definite_hub_mask, 'is_bot'] = False
+    if 'is_bot_neural' in df.columns:
+        df.loc[definite_hub_mask, 'is_bot_neural'] = False
+    if 'user_category' in df.columns:
+        df.loc[definite_hub_mask & (df['user_category'] == 'bot'), 'user_category'] = 'download_hub'
+    
+    n_protected = definite_hub_mask.sum()
+    if n_protected > 0:
+        logger.info(f"    Hub protection applied: {n_protected:,} locations protected from bot classification")
+    
+    return df
 
 
 def add_bot_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -2906,11 +2974,19 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         if enable_bot_head and bot_predictions is not None:
             df['is_bot_neural'] = bot_predictions == 1
             
+            # NEVER classify as bot if definite hub pattern
+            protected_from_bot = (
+                (df['downloads_per_user'] > 500) |  # High DL/user
+                ((df['unique_users'] <= 10) & (df['downloads_per_user'] > 100)) |  # Few users + high DL
+                ((df['unique_users'] <= 100) & (df['downloads_per_user'] > 200))  # Small scale + very high DL
+            )
+            
             # Bot head override ONLY for non-hub locations with BOT patterns
             # Key criteria for bots: Many users, low-moderate DL/user
             bot_head_bots = (
                 (bot_predictions == 1) & 
                 ~download_hub_mask &  # NOT a download hub
+                ~protected_from_bot &  # NOT protected from bot classification
                 (df['unique_users'] > 100) &  # Bots have many users
                 (df['downloads_per_user'] < 100)  # Bots have low-moderate DL/user
             )
@@ -2918,6 +2994,11 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             if bot_head_bots.any():
                 logger.info(f"    Bot head override (filtered): {bot_head_bots.sum():,} locations marked as bots")
                 df.loc[bot_head_bots, 'user_category'] = 'bot'
+            
+            # Log protected locations
+            n_protected = protected_from_bot.sum()
+            if n_protected > 0:
+                logger.info(f"    Bot head protection: {n_protected:,} hub patterns protected from bot classification")
             
         # Apply post-processing overrides for obvious bot patterns
         logger.info("    Applying post-processing bot detection overrides...")
@@ -2956,11 +3037,32 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         df.loc[obvious_bots_mask, 'user_category'] = 'bot'
         df.loc[obvious_legitimate_mask, 'user_category'] = 'independent_user'
     
+    # =========================================================================
+    # Apply Hub Protection Function
+    # =========================================================================
+    logger.info("    Applying hub protection...")
+    df = _apply_hub_protection(df)
+    
     # Set boolean flags based on category
     df['is_bot'] = df['user_category'] == 'bot'
     df['is_download_hub'] = df['user_category'] == 'download_hub'
     df['is_independent_user'] = df['user_category'] == 'independent_user'
     df['is_normal_user'] = df['user_category'] == 'normal'
+    
+    # =========================================================================
+    # Final Safety Check: ensure no high DL/user locations are classified as bots
+    # =========================================================================
+    logger.info("    Performing final safety check...")
+    final_hub_override = (
+        (df['is_bot'] == True) & 
+        (df['downloads_per_user'] > 500)
+    )
+    if final_hub_override.any():
+        logger.warning(f"    Final safety check: overriding {final_hub_override.sum()} "
+                       f"bot classifications with DL/user >500 to hub")
+        df.loc[final_hub_override, 'is_bot'] = False
+        df.loc[final_hub_override, 'is_download_hub'] = True
+        df.loc[final_hub_override, 'user_category'] = 'download_hub'
 
     # Log results
     n_bots = df['is_bot'].sum()
