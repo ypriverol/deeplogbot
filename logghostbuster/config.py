@@ -126,3 +126,36 @@ def get_bot_thresholds() -> dict:
         'min_total_downloads': 1000,
         'low_entropy_quantile': 0.2,
     })
+
+
+def get_category_rules() -> dict:
+    """Get category detection rules from config."""
+    return get_classification_config().get('categories', {
+        'ci_cd_pipeline': {
+            'max_users': 10,
+            'min_downloads_per_user': 50,
+            'max_downloads_per_user': 500,
+            'max_file_diversity_ratio': 0.3,
+            'min_regularity_score': 0.8,
+        },
+        'research_group': {
+            'min_users': 5,
+            'max_users': 50,
+            'min_downloads_per_user': 10,
+            'max_downloads_per_user': 100,
+            'min_working_hours_ratio': 0.5,
+            'min_file_diversity_ratio': 0.3,
+        },
+        'bulk_downloader': {
+            'max_users': 5,
+            'min_downloads_per_user': 100,
+            'max_downloads_per_user': 1000,
+        },
+        'course_workshop': {
+            'min_users': 50,
+            'max_users': 500,
+            'min_downloads_per_user': 5,
+            'max_downloads_per_user': 20,
+            'max_file_diversity_ratio': 0.3,
+        },
+    })
