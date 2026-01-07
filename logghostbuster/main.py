@@ -16,7 +16,6 @@ from .models import (
     classify_locations_ml, 
     classify_locations_deep
 )
-from .models.classification.pattern_discovery import classify_with_pattern_discovery
 from .reports import annotate_downloads
 from .reports import generate_report
 from .features.schema import LogSchema, EBI_SCHEMA
@@ -270,47 +269,17 @@ def run_bot_annotator(
                                                   contamination=contamination, 
                                                   sequence_length=sequence_length)
         elif classification_method.lower() == 'pattern':
-            logger.info("Using pattern discovery classification (Contrastive Learning + Clustering)...")
-            logger.info("  Ground Truth Rules:")
-            logger.info("    - BOT: >10K users AND <10 DL/user")
-            logger.info("    - HUB: >1K DL/user")
-            logger.info("    - INDIVIDUAL: ≤5 users AND ≤3 DL/user")
-            logger.info("    - Everything else: Pattern Discovery via Deep Learning")
-            
-            analysis_df, pattern_info = classify_with_pattern_discovery(
-                analysis_df,
-                [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'],
-                input_parquet=input_parquet,
-                conn=conn,
-                enable_behavioral_features=True,
-                embedding_dim=64,
-                contrastive_epochs=50,
-                min_cluster_size=50
+            # Pattern discovery has been merged into deep architecture
+            raise ValueError(
+                "The 'pattern' classification method has been consolidated into 'deep' architecture. "
+                "Please use '--classification-method deep' with optional parameters: "
+                "--enable-behavioral-extraction and --encoder-type lstm|transformer|hybrid"
             )
-            
-            # Map discovered patterns to standard categories for compatibility
-            if 'discovered_pattern' in analysis_df.columns:
-                # Ground truth categories map directly
-                analysis_df['is_bot'] = analysis_df['ground_truth_category'] == 'bot'
-                analysis_df['is_download_hub'] = analysis_df['ground_truth_category'] == 'download_hub'
-                
-                # Store discovered patterns for reporting
-                analysis_df['user_category'] = analysis_df['discovered_pattern']
-                
-                # Log pattern info
-                if pattern_info:
-                    logger.info("\nDiscovered Behavioral Patterns:")
-                    for pattern_id, info in pattern_info.items():
-                        logger.info(f"  {info.get('suggested_name', f'Pattern_{pattern_id}')}: "
-                                   f"{info.get('count', 0):,} locations")
-            
-            cluster_df = pd.DataFrame()  # Empty for compatibility
-            
         elif classification_method.lower() == 'rules':
             logger.info("Using rule-based classification...")
             analysis_df = classify_locations(analysis_df)
         else:
-            raise ValueError(f"Unknown classification method: {classification_method}. Must be 'rules', 'ml', 'deep', or 'pattern'")
+            raise ValueError(f"Unknown classification method: {classification_method}. Must be 'rules', 'ml', or 'deep'")
         
         bot_locs = analysis_df[analysis_df['is_bot']].copy()
         hub_locs = analysis_df[analysis_df['is_download_hub']].copy()
@@ -540,8 +509,8 @@ def main():
     parser.add_argument('--sample-size', '-s', type=int, default=None,
                        help='Randomly sample N records from all years before processing (e.g., 1000000 for 1M records)')
     parser.add_argument('--classification-method', '-m', type=str, default='rules',
-                       choices=['rules', 'ml', 'deep', 'pattern'],
-                       help='Classification method: "rules" for rule-based (default), "ml" for supervised ML-based, "deep" for deep architecture (Isolation Forest + Transformers), or "pattern" for pattern discovery (Contrastive Learning + Clustering)')
+                       choices=['rules', 'ml', 'deep'],
+                       help='Classification method: "rules" for rule-based (default), "ml" for supervised ML-based, or "deep" for deep architecture (Isolation Forest + Transformers)')
     parser.add_argument('--min-location-downloads', type=int, default=None,
                        help='Minimum downloads required for a location to be included (default: 1, set higher to filter noise)')
     parser.add_argument('--time-window', type=str, default='month',
