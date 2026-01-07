@@ -3586,9 +3586,9 @@ def _classify_detailed_categories(df: pd.DataFrame) -> pd.DataFrame:
         (df['downloads_per_user'] >= ci_cd_rule['min_downloads_per_user']) &
         (df['downloads_per_user'] <= ci_cd_rule['max_downloads_per_user'])
     )
-    if 'file_diversity_ratio' in df.columns:
+    if 'file_diversity_ratio' in df.columns and 'max_file_diversity_ratio' in ci_cd_rule:
         ci_cd_mask &= (df['file_diversity_ratio'] <= ci_cd_rule['max_file_diversity_ratio'])
-    if 'regularity_score' in df.columns:
+    if 'regularity_score' in df.columns and 'min_regularity_score' in ci_cd_rule:
         ci_cd_mask &= (df['regularity_score'] >= ci_cd_rule['min_regularity_score'])
     df.loc[ci_cd_mask, 'detailed_category'] = 'ci_cd_pipeline'
     
@@ -3601,9 +3601,9 @@ def _classify_detailed_categories(df: pd.DataFrame) -> pd.DataFrame:
         (df['downloads_per_user'] <= rg_rule['max_downloads_per_user']) &
         (df['detailed_category'] == 'unclassified')  # Don't override
     )
-    if 'working_hours_ratio' in df.columns:
+    if 'working_hours_ratio' in df.columns and 'min_working_hours_ratio' in rg_rule:
         rg_mask &= (df['working_hours_ratio'] >= rg_rule['min_working_hours_ratio'])
-    if 'file_diversity_ratio' in df.columns:
+    if 'file_diversity_ratio' in df.columns and 'min_file_diversity_ratio' in rg_rule:
         rg_mask &= (df['file_diversity_ratio'] >= rg_rule['min_file_diversity_ratio'])
     df.loc[rg_mask, 'detailed_category'] = 'research_group'
     
@@ -3626,7 +3626,7 @@ def _classify_detailed_categories(df: pd.DataFrame) -> pd.DataFrame:
         (df['downloads_per_user'] <= cw_rule['max_downloads_per_user']) &
         (df['detailed_category'] == 'unclassified')
     )
-    if 'file_diversity_ratio' in df.columns:
+    if 'file_diversity_ratio' in df.columns and 'max_file_diversity_ratio' in cw_rule:
         cw_mask &= (df['file_diversity_ratio'] <= cw_rule['max_file_diversity_ratio'])
     df.loc[cw_mask, 'detailed_category'] = 'course_workshop'
     
@@ -3637,7 +3637,7 @@ def _classify_detailed_categories(df: pd.DataFrame) -> pd.DataFrame:
         (df['downloads_per_user'] >= as_rule['min_downloads_per_user']) &
         (df['detailed_category'] == 'unclassified')
     )
-    if 'regularity_score' in df.columns:
+    if 'regularity_score' in df.columns and 'min_regularity_score' in as_rule:
         as_mask &= (df['regularity_score'] >= as_rule['min_regularity_score'])
     df.loc[as_mask, 'detailed_category'] = 'automated_sync'
     
@@ -3650,7 +3650,7 @@ def _classify_detailed_categories(df: pd.DataFrame) -> pd.DataFrame:
         (df['downloads_per_user'] <= api_rule['max_downloads_per_user']) &
         (df['detailed_category'] == 'unclassified')
     )
-    if 'working_hours_ratio' in df.columns:
+    if 'working_hours_ratio' in df.columns and 'min_working_hours_ratio' in api_rule:
         api_mask &= (df['working_hours_ratio'] >= api_rule['min_working_hours_ratio'])
     df.loc[api_mask, 'detailed_category'] = 'api_client'
     
