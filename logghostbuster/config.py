@@ -120,9 +120,9 @@ def get_bot_score_weights() -> dict:
 def get_bot_thresholds() -> dict:
     """Get bot detection thresholds from config."""
     return get_classification_config().get('bot_thresholds', {
-        'high_anomaly_score': 0.3,
-        'very_high_anomaly_score': 0.5,
+        'high_anomaly_score': 0.2,
+        'very_high_anomaly_score': 0.25,
         'low_working_hours_ratio': 0.3,
         'min_total_downloads': 1000,
-        'low_entropy_quantile': 0.25,
+        'low_entropy_quantile': 0.2,
     })

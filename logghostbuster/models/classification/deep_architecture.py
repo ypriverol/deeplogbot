@@ -3038,9 +3038,9 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             protected_from_bot = (
                 (df['downloads_per_user'] > high_dl_rule.get('min_downloads_per_user', 500)) |  # High DL/user
                 ((df['unique_users'] <= very_few_rule.get('max_users', 10)) & 
-                 (df['downloads_per_user'] > few_users_rule.get('min_downloads_per_user', 100))) |  # Few users + high DL
+                 (df['downloads_per_user'] > 100)) |  # Few users (≤10) + high DL (>100)
                 ((df['unique_users'] <= few_users_rule.get('max_users', 100)) & 
-                 (df['downloads_per_user'] > very_few_rule.get('min_downloads_per_user', 200)))  # Small scale + very high DL
+                 (df['downloads_per_user'] > 200))  # Small scale (≤100) + very high DL (>200)
             )
             
             # Bot head override ONLY for non-hub locations with BOT patterns

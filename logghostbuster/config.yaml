@@ -81,9 +81,9 @@ classification:
 
   # Thresholds for bot detection
   bot_thresholds:
-    high_anomaly_score: 0.3
-    very_high_anomaly_score: 0.5
+    high_anomaly_score: 0.2
+    very_high_anomaly_score: 0.25
     low_working_hours_ratio: 0.3
     min_total_downloads: 1000
-    low_entropy_quantile: 0.25
+    low_entropy_quantile: 0.2
 
