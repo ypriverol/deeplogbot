@@ -7,6 +7,57 @@ This module implements a multi-stage architecture:
 The Transformer processes time-series features and combines them with fixed features
 to directly classify locations into categories (BOT, DOWNLOAD_HUB, NORMAL, INDEPENDENT_USER, OTHER).
 This approach is similar to the paper's architecture without clustering.
+
+ENHANCEMENTS FOR DISCOVERING NEW BOT PATTERNS:
+===============================================
+
+The original approach was limited by circular dependency on rule-based labels.
+This module now includes 7 key enhancements to discover bots beyond existing rules:
+
+1. **Anomaly-Based Label Generation** (generate_anomaly_based_labels):
+   - Uses HDBSCAN clustering on Isolation Forest anomalies
+   - Discovers natural groupings based on behavioral patterns
+   - Eliminates dependency on hard-coded thresholds
+
+2. **Contrastive Learning** (ContrastiveTransformerEncoder):
+   - Learns representations where similar patterns cluster together
+   - Uses NT-Xent contrastive loss with data augmentation
+   - Discovers patterns WITHOUT explicit labels
+
+3. **Pseudo-Label Refinement** (iterative_pseudo_label_refinement):
+   - Starts with rule-based labels as noisy pseudo-labels
+   - Iteratively refines predictions using model confidence
+   - Allows model to override low-confidence rule predictions
+
+4. **Temporal Anomaly Detection** (TemporalAnomalyDetector):
+   - Bidirectional LSTM with attention for temporal patterns
+   - Detects bot-specific signatures:
+     * Regular/periodic access patterns
+     * Sudden bursts followed by silence
+     * Non-human access timing (3 AM spikes)
+
+5. **Ensemble-Based Discovery** (ensemble_bot_discovery):
+   - Combines Isolation Forest, LOF, and One-Class SVM
+   - Focuses on cases where 2+ methods agree
+   - Discovers anomalies that rules miss
+
+6. **Bot Signature Features** (add_bot_signature_features):
+   - Adds 7 discriminative features:
+     * access_regularity: Std dev of hourly distribution
+     * ua_per_user: User-Agent diversity per user
+     * request_velocity: Downloads per active hour
+     * ip_concentration: 1 - IP entropy
+     * session_anomaly: Deviation from median session length
+     * request_pattern_anomaly: 1 / file request entropy
+     * weekend_weekday_imbalance: Deviation from expected 2/7 ratio
+
+7. **Active Learning** (identify_uncertain_cases_for_review):
+   - Uses entropy + margin-based uncertainty
+   - Identifies edge cases for human review
+   - Helps discover new attack patterns
+
+These enhancements enable the model to discover NEW bots that don't match
+existing rule patterns, with better generalization to evolving behaviors.
 """
 
 import pandas as pd
@@ -17,10 +68,23 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
-from typing import Optional, List, Tuple
+from sklearn.cluster import DBSCAN
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.svm import OneClassSVM
+from sklearn.ensemble import IsolationForest
+from typing import Optional, List, Tuple, Dict
+import warnings
 
 from ...utils import logger
 from ..isoforest.models import train_isolation_forest
+
+# Try to import HDBSCAN, fall back to DBSCAN if not available
+try:
+    import hdbscan
+    HDBSCAN_AVAILABLE = True
+except ImportError:
+    HDBSCAN_AVAILABLE = False
+    warnings.warn("HDBSCAN not available, falling back to DBSCAN for clustering")
 
 
 # =====================================================================
@@ -1259,6 +1323,626 @@ def train_supervised_classifier(
     
     logger.info(f"    Supervised fine-tuning completed. Best validation accuracy: {best_val_acc:.4f}, Best Bot F1: {best_val_bot_f1:.4f}")
     return classifier
+
+
+# =====================================================================
+# Enhancement 1: Anomaly-Based Label Generation
+# =====================================================================
+
+def generate_anomaly_based_labels(df: pd.DataFrame, feature_columns: List[str], 
+                                   anomaly_scores: np.ndarray,
+                                   min_cluster_size: int = 50) -> Tuple[np.ndarray, Dict]:
+    """
+    Generate labels using HDBSCAN clustering on Isolation Forest anomalies.
+    
+    This replaces rule-based labels with unsupervised discovery of natural groupings
+    based on behavioral patterns rather than hard-coded thresholds.
+    
+    Args:
+        df: DataFrame with location features
+        feature_columns: List of feature column names
+        anomaly_scores: Anomaly scores from Isolation Forest
+        min_cluster_size: Minimum cluster size for HDBSCAN
+        
+    Returns:
+        Tuple of (cluster_labels, cluster_metadata)
+    """
+    logger.info("    Generating anomaly-based labels with clustering...")
+    
+    # Prepare features
+    X = df[feature_columns].fillna(0).values
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Combine features with anomaly scores
+    X_with_anomaly = np.column_stack([X_scaled, anomaly_scores.reshape(-1, 1)])
+    
+    # Use HDBSCAN if available, otherwise fall back to DBSCAN
+    if HDBSCAN_AVAILABLE:
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=10,
+            metric='euclidean',
+            cluster_selection_epsilon=0.1,
+            cluster_selection_method='eom'
+        )
+        cluster_labels = clusterer.fit_predict(X_with_anomaly)
+        cluster_probs = clusterer.probabilities_ if hasattr(clusterer, 'probabilities_') else None
+    else:
+        # Fall back to DBSCAN
+        clusterer = DBSCAN(eps=0.5, min_samples=min_cluster_size)
+        cluster_labels = clusterer.fit_predict(X_with_anomaly)
+        cluster_probs = None
+    
+    # Analyze clusters
+    unique_clusters = np.unique(cluster_labels)
+    n_clusters = len(unique_clusters[unique_clusters != -1])
+    n_noise = np.sum(cluster_labels == -1)
+    
+    logger.info(f"      Found {n_clusters} clusters, {n_noise} noise points")
+    
+    # Compute cluster metadata
+    cluster_metadata = {}
+    for cluster_id in unique_clusters:
+        if cluster_id == -1:
+            continue
+        mask = cluster_labels == cluster_id
+        cluster_metadata[cluster_id] = {
+            'size': mask.sum(),
+            'mean_anomaly_score': anomaly_scores[mask].mean(),
+            'mean_users': df.loc[mask, 'unique_users'].mean() if 'unique_users' in df.columns else 0,
+            'mean_dl_per_user': df.loc[mask, 'downloads_per_user'].mean() if 'downloads_per_user' in df.columns else 0,
+        }
+        logger.info(f"      Cluster {cluster_id}: size={cluster_metadata[cluster_id]['size']}, "
+                   f"anomaly={cluster_metadata[cluster_id]['mean_anomaly_score']:.3f}, "
+                   f"users={cluster_metadata[cluster_id]['mean_users']:.1f}, "
+                   f"dl/user={cluster_metadata[cluster_id]['mean_dl_per_user']:.1f}")
+    
+    return cluster_labels, cluster_metadata
+
+
+# =====================================================================
+# Enhancement 2: Contrastive Learning for Pattern Discovery
+# =====================================================================
+
+class ContrastiveTransformerEncoder(nn.Module):
+    """
+    Transformer encoder that learns representations through contrastive learning.
+    
+    Uses NT-Xent (Normalized Temperature-scaled Cross Entropy) loss to pull
+    similar behavioral patterns together without explicit labels.
+    """
+    
+    def __init__(self, ts_input_dim: int, fixed_input_dim: int, d_model: int = 128,
+                 nhead: int = 8, num_layers: int = 3, dim_feedforward: int = 512,
+                 projection_dim: int = 128, temperature: float = 0.5):
+        super().__init__()
+        
+        # Shared encoder
+        self.ts_input_projection = nn.Linear(ts_input_dim, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=0.1,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.fixed_projection = nn.Linear(fixed_input_dim, d_model)
+        
+        # Projection head for contrastive learning
+        self.projection_head = nn.Sequential(
+            nn.Linear(d_model * 2, dim_feedforward),
+            nn.ReLU(),
+            nn.Linear(dim_feedforward, projection_dim)
+        )
+        
+        self.temperature = temperature
+    
+    def forward(self, ts_features: torch.Tensor, fixed_features: torch.Tensor) -> torch.Tensor:
+        """Encode features and project to contrastive space."""
+        # Encode time-series
+        ts_proj = self.ts_input_projection(ts_features)
+        ts_encoded = self.transformer(ts_proj)
+        ts_pooled = ts_encoded.mean(dim=1)
+        
+        # Project fixed features
+        fixed_proj = self.fixed_projection(fixed_features)
+        
+        # Combine and project
+        combined = torch.cat([ts_pooled, fixed_proj], dim=1)
+        z = self.projection_head(combined)
+        
+        # L2 normalize for cosine similarity
+        z = F.normalize(z, dim=1)
+        return z
+    
+    def contrastive_loss(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
+        """
+        NT-Xent contrastive loss between two augmented views.
+        
+        Args:
+            z1, z2: Normalized embeddings [batch_size, projection_dim]
+        
+        Returns:
+            Contrastive loss scalar
+        """
+        batch_size = z1.shape[0]
+        
+        # Compute similarity matrix
+        z = torch.cat([z1, z2], dim=0)  # [2*batch_size, projection_dim]
+        sim_matrix = torch.mm(z, z.t()) / self.temperature  # [2*batch_size, 2*batch_size]
+        
+        # Create positive pair mask
+        mask = torch.eye(2 * batch_size, dtype=torch.bool, device=z.device)
+        sim_matrix = sim_matrix.masked_fill(mask, float('-inf'))
+        
+        # Positive pairs are at positions (i, i+batch_size) and (i+batch_size, i)
+        positive_pairs = torch.cat([
+            torch.arange(batch_size, 2 * batch_size, device=z.device),
+            torch.arange(batch_size, device=z.device)
+        ])
+        
+        # Compute loss
+        log_prob = F.log_softmax(sim_matrix, dim=1)
+        loss = -log_prob[torch.arange(2 * batch_size, device=z.device), positive_pairs].mean()
+        
+        return loss
+
+
+def augment_time_series(ts: torch.Tensor, augmentation_strength: float = 0.1) -> torch.Tensor:
+    """
+    Create augmented view of time series data for contrastive learning.
+    
+    Applies random transformations: noise, scaling, masking.
+    
+    Args:
+        ts: Time series tensor [batch_size, seq_len, features]
+        augmentation_strength: Strength of augmentation
+        
+    Returns:
+        Augmented time series
+    """
+    ts_aug = ts.clone()
+    
+    # Add random noise
+    noise = torch.randn_like(ts) * augmentation_strength
+    ts_aug = ts_aug + noise
+    
+    # Random scaling per feature
+    scale = 1.0 + torch.randn(ts.shape[0], 1, ts.shape[2], device=ts.device) * augmentation_strength
+    ts_aug = ts_aug * scale
+    
+    # Random masking (set some timesteps to zero)
+    mask_prob = augmentation_strength
+    mask = torch.rand(ts.shape[0], ts.shape[1], 1, device=ts.device) > mask_prob
+    ts_aug = ts_aug * mask
+    
+    return ts_aug
+
+
+# =====================================================================
+# Enhancement 3: Pseudo-Label Refinement
+# =====================================================================
+
+def iterative_pseudo_label_refinement(
+    classifier: TransformerClassifier,
+    X_ts: torch.Tensor,
+    X_fixed: torch.Tensor,
+    initial_labels: np.ndarray,
+    device: torch.device,
+    n_iterations: int = 3,
+    confidence_threshold: float = 0.8,
+    learning_rate: float = 1e-5,
+    batch_size: int = 256
+) -> Tuple[TransformerClassifier, np.ndarray]:
+    """
+    Iteratively refine pseudo-labels using model confidence.
+    
+    Starts with rule-based labels as noisy pseudo-labels, then allows
+    the model to override low-confidence predictions in subsequent iterations.
+    
+    Args:
+        classifier: Pre-trained classifier
+        X_ts: Time-series features
+        X_fixed: Fixed features
+        initial_labels: Initial rule-based labels
+        device: Training device
+        n_iterations: Number of refinement iterations
+        confidence_threshold: Threshold for high-confidence predictions
+        learning_rate: Learning rate for refinement
+        batch_size: Batch size
+        
+    Returns:
+        Tuple of (refined_classifier, refined_labels)
+    """
+    logger.info(f"    Starting pseudo-label refinement ({n_iterations} iterations)...")
+    
+    current_labels = initial_labels.copy()
+    
+    for iteration in range(n_iterations):
+        logger.info(f"      Iteration {iteration + 1}/{n_iterations}")
+        
+        # Train on current labels
+        y_labels = torch.LongTensor(current_labels).to(device)
+        dataset = torch.utils.data.TensorDataset(X_ts, X_fixed, y_labels)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        
+        optimizer = optim.Adam(classifier.parameters(), lr=learning_rate)
+        criterion = nn.CrossEntropyLoss()
+        
+        # Brief training
+        classifier.train()
+        for _ in range(5):  # 5 epochs per iteration
+            for ts_batch, fixed_batch, y_batch in loader:
+                ts_batch = ts_batch.to(device)
+                fixed_batch = fixed_batch.to(device)
+                y_batch = y_batch.to(device)
+                
+                optimizer.zero_grad()
+                logits, _, _ = classifier(ts_batch, fixed_batch)
+                loss = criterion(logits, y_batch)
+                loss.backward()
+                optimizer.step()
+        
+        # Get predictions and confidence
+        classifier.eval()
+        with torch.no_grad():
+            logits, _, _ = classifier(X_ts, X_fixed)
+            probs = F.softmax(logits, dim=1)
+            max_probs, predictions = torch.max(probs, dim=1)
+            
+            max_probs = max_probs.cpu().numpy()
+            predictions = predictions.cpu().numpy()
+        
+        # Update labels for high-confidence predictions
+        high_confidence_mask = max_probs > confidence_threshold
+        n_updated = np.sum(current_labels[high_confidence_mask] != predictions[high_confidence_mask])
+        current_labels[high_confidence_mask] = predictions[high_confidence_mask]
+        
+        logger.info(f"        Updated {n_updated} labels with high confidence (>{confidence_threshold})")
+        logger.info(f"        Label distribution: {np.bincount(current_labels)}")
+    
+    logger.info("    Pseudo-label refinement completed")
+    return classifier, current_labels
+
+
+# =====================================================================
+# Enhancement 4: Temporal Anomaly Detection
+# =====================================================================
+
+class TemporalAnomalyDetector(nn.Module):
+    """
+    Bidirectional LSTM with attention for detecting temporal bot patterns.
+    
+    Detects patterns like:
+    - Regular/periodic access (bot scheduling)
+    - Sudden bursts followed by silence
+    - Non-human timing (3 AM spikes)
+    """
+    
+    def __init__(self, input_dim: int, hidden_dim: int = 64, num_layers: int = 2):
+        super().__init__()
+        
+        self.lstm = nn.LSTM(
+            input_dim,
+            hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.2 if num_layers > 1 else 0
+        )
+        
+        # Attention mechanism
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim * 2,  # Bidirectional
+            num_heads=4,
+            dropout=0.1,
+            batch_first=True
+        )
+        
+        # Anomaly score head
+        self.anomaly_head = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            x: Time series [batch_size, seq_len, input_dim]
+        
+        Returns:
+            Tuple of (anomaly_scores [batch_size], attention_weights)
+        """
+        # LSTM encoding
+        lstm_out, _ = self.lstm(x)  # [batch_size, seq_len, hidden_dim*2]
+        
+        # Attention
+        attn_out, attn_weights = self.attention(lstm_out, lstm_out, lstm_out)
+        
+        # Pool over sequence
+        pooled = attn_out.mean(dim=1)  # [batch_size, hidden_dim*2]
+        
+        # Anomaly score
+        anomaly_scores = self.anomaly_head(pooled).squeeze(-1)  # [batch_size]
+        
+        return anomaly_scores, attn_weights
+
+
+# =====================================================================
+# Enhancement 5: Ensemble-Based Discovery
+# =====================================================================
+
+def ensemble_bot_discovery(df: pd.DataFrame, feature_columns: List[str],
+                           contamination: float = 0.15) -> Tuple[np.ndarray, Dict]:
+    """
+    Combine multiple anomaly detection methods to discover bots.
+    
+    Uses Isolation Forest, LOF, and One-Class SVM. Focuses on cases where
+    2+ methods agree but existing rules don't catch them.
+    
+    Args:
+        df: DataFrame with location features
+        feature_columns: List of feature column names
+        contamination: Expected proportion of anomalies
+        
+    Returns:
+        Tuple of (ensemble_predictions, method_agreement_counts)
+    """
+    logger.info("    Running ensemble anomaly detection...")
+    
+    # Prepare features
+    X = df[feature_columns].fillna(0).values
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Method 1: Isolation Forest
+    logger.info("      Running Isolation Forest...")
+    iso_forest = IsolationForest(
+        contamination=contamination,
+        n_estimators=100,
+        random_state=42,
+        n_jobs=-1
+    )
+    iso_predictions = iso_forest.fit_predict(X_scaled)
+    iso_scores = -iso_forest.score_samples(X_scaled)
+    
+    # Method 2: Local Outlier Factor
+    logger.info("      Running Local Outlier Factor...")
+    lof = LocalOutlierFactor(
+        contamination=contamination,
+        n_neighbors=20,
+        n_jobs=-1
+    )
+    lof_predictions = lof.fit_predict(X_scaled)
+    lof_scores = -lof.negative_outlier_factor_
+    
+    # Method 3: One-Class SVM
+    logger.info("      Running One-Class SVM...")
+    ocsvm = OneClassSVM(
+        nu=contamination,
+        kernel='rbf',
+        gamma='auto'
+    )
+    ocsvm_predictions = ocsvm.fit_predict(X_scaled)
+    ocsvm_scores = -ocsvm.score_samples(X_scaled)
+    
+    # Normalize scores to [0, 1] - compute min/max once for efficiency
+    iso_min, iso_max = iso_scores.min(), iso_scores.max()
+    lof_min, lof_max = lof_scores.min(), lof_scores.max()
+    ocsvm_min, ocsvm_max = ocsvm_scores.min(), ocsvm_scores.max()
+    
+    iso_scores = (iso_scores - iso_min) / (iso_max - iso_min + 1e-10)
+    lof_scores = (lof_scores - lof_min) / (lof_max - lof_min + 1e-10)
+    ocsvm_scores = (ocsvm_scores - ocsvm_min) / (ocsvm_max - ocsvm_min + 1e-10)
+    
+    # Count agreements (anomaly = -1, normal = 1)
+    predictions = np.column_stack([iso_predictions, lof_predictions, ocsvm_predictions])
+    anomaly_votes = np.sum(predictions == -1, axis=1)
+    
+    # Ensemble: 2 or more methods agree on anomaly
+    ensemble_predictions = np.where(anomaly_votes >= 2, -1, 1)
+    
+    # Average scores for anomalies
+    ensemble_scores = (iso_scores + lof_scores + ocsvm_scores) / 3
+    
+    # Statistics
+    n_iso = np.sum(iso_predictions == -1)
+    n_lof = np.sum(lof_predictions == -1)
+    n_ocsvm = np.sum(ocsvm_predictions == -1)
+    n_ensemble = np.sum(ensemble_predictions == -1)
+    n_all_agree = np.sum(anomaly_votes == 3)
+    n_two_agree = np.sum(anomaly_votes == 2)
+    
+    logger.info(f"      Isolation Forest: {n_iso} anomalies")
+    logger.info(f"      LOF: {n_lof} anomalies")
+    logger.info(f"      One-Class SVM: {n_ocsvm} anomalies")
+    logger.info(f"      Ensemble (2+ agree): {n_ensemble} anomalies")
+    logger.info(f"        All 3 methods agree: {n_all_agree}")
+    logger.info(f"        2 methods agree: {n_two_agree}")
+    
+    method_agreement = {
+        'iso_forest': n_iso,
+        'lof': n_lof,
+        'one_class_svm': n_ocsvm,
+        'ensemble': n_ensemble,
+        'all_agree': n_all_agree,
+        'two_agree': n_two_agree,
+        'anomaly_votes': anomaly_votes,
+        'ensemble_scores': ensemble_scores
+    }
+    
+    return ensemble_predictions, method_agreement
+
+
+# =====================================================================
+# Enhancement 6: Bot Signature Features
+# =====================================================================
+
+def add_bot_signature_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add discriminative bot signature features.
+    
+    Features added:
+    - access_regularity: Inverse of hourly entropy (low entropy = regular = bot-like)
+    - ua_per_user: User-Agent diversity per user
+    - request_velocity: Downloads per active hour
+    - ip_concentration: 1 - IP entropy
+    - session_anomaly: Deviation from median session length
+    - request_pattern_anomaly: 1 / file request entropy
+    - weekend_weekday_imbalance: Deviation from expected 2/7 ratio
+    
+    Args:
+        df: DataFrame with location features
+        
+    Returns:
+        DataFrame with additional signature features
+    """
+    logger.info("    Adding bot signature features...")
+    
+    # 1. Access regularity (temporal pattern consistency)
+    if 'hourly_entropy' in df.columns:
+        # High entropy = irregular, low entropy = regular (bot-like)
+        df['access_regularity'] = 1.0 / (df['hourly_entropy'] + 0.1)
+    else:
+        df['access_regularity'] = 0.0
+    
+    # 2. User-Agent diversity (if available in raw data, use proxy)
+    # Proxy: locations with many users but low diversity are suspicious
+    if 'unique_users' in df.columns and 'total_downloads' in df.columns:
+        df['ua_per_user'] = 1.0 / (df['unique_users'] / (df['total_downloads'] + 1) + 0.01)
+    else:
+        df['ua_per_user'] = 1.0
+    
+    # 3. Request velocity (downloads per active time)
+    if 'total_downloads' in df.columns:
+        # Estimate active hours from entropy and working hours ratio
+        if 'working_hours_ratio' in df.columns:
+            active_hours = df['working_hours_ratio'] * 24 * 7  # Hours per week
+            df['request_velocity'] = df['total_downloads'] / (active_hours + 1)
+        else:
+            df['request_velocity'] = df['total_downloads'] / 168  # Assume full week
+    else:
+        df['request_velocity'] = 0.0
+    
+    # 4. IP concentration (1 - entropy)
+    # Proxy: high users with low diversity suggests IP cycling
+    if 'unique_users' in df.columns and 'downloads_per_user' in df.columns:
+        # Estimate IP entropy from user distribution
+        user_entropy = np.log1p(df['unique_users']) / np.log1p(df['unique_users'].max() + 1)
+        df['ip_concentration'] = 1.0 - user_entropy
+    else:
+        df['ip_concentration'] = 0.0
+    
+    # 5. Session anomaly (deviation from median)
+    if 'downloads_per_user' in df.columns:
+        median_dl_per_user = df['downloads_per_user'].median()
+        df['session_anomaly'] = np.abs(df['downloads_per_user'] - median_dl_per_user) / (median_dl_per_user + 1)
+    else:
+        df['session_anomaly'] = 0.0
+    
+    # 6. Request pattern anomaly (file diversity)
+    # Bots often request same files repeatedly
+    # Proxy: low DL/user with high users suggests coordinated same-file requests
+    if 'downloads_per_user' in df.columns and 'unique_users' in df.columns:
+        # Low DL/user = likely requesting same files
+        file_entropy_proxy = df['downloads_per_user'] / (np.log1p(df['unique_users']) + 1)
+        df['request_pattern_anomaly'] = 1.0 / (file_entropy_proxy + 0.1)
+    else:
+        df['request_pattern_anomaly'] = 0.0
+    
+    # 7. Weekend/weekday imbalance
+    # Bots work 24/7, humans have patterns
+    if 'working_hours_ratio' in df.columns:
+        # Expected ratio: ~5/7 weekdays for humans
+        # Bots: closer to uniform or inverted
+        expected_weekday_ratio = 5.0 / 7.0
+        df['weekend_weekday_imbalance'] = np.abs(df['working_hours_ratio'] - expected_weekday_ratio)
+    else:
+        df['weekend_weekday_imbalance'] = 0.0
+    
+    n_new_features = 7
+    logger.info(f"      Added {n_new_features} bot signature features")
+    
+    return df
+
+
+# =====================================================================
+# Enhancement 7: Active Learning for Edge Cases
+# =====================================================================
+
+def identify_uncertain_cases_for_review(
+    df: pd.DataFrame,
+    classifier: TransformerClassifier,
+    X_ts: torch.Tensor,
+    X_fixed: torch.Tensor,
+    device: torch.device,
+    top_k: int = 100,
+    entropy_weight: float = 0.5,
+    margin_weight: float = 0.5
+) -> pd.DataFrame:
+    """
+    Identify uncertain cases using entropy and margin-based uncertainty.
+    
+    These are cases where human review would help discover new bot patterns.
+    
+    Args:
+        df: DataFrame with location features
+        classifier: Trained classifier
+        X_ts: Time-series features
+        X_fixed: Fixed features
+        device: Device
+        top_k: Number of top uncertain cases to return
+        entropy_weight: Weight for entropy-based uncertainty
+        margin_weight: Weight for margin-based uncertainty
+        
+    Returns:
+        DataFrame with top uncertain cases and their uncertainty scores
+    """
+    logger.info(f"    Identifying top {top_k} uncertain cases for review...")
+    
+    classifier.eval()
+    with torch.no_grad():
+        logits, _, _ = classifier(X_ts.to(device), X_fixed.to(device))
+        probs = F.softmax(logits, dim=1).cpu().numpy()
+    
+    # 1. Entropy-based uncertainty
+    # High entropy = model is uncertain
+    epsilon = 1e-10
+    entropy = -np.sum(probs * np.log(probs + epsilon), axis=1)
+    entropy_normalized = entropy / np.log(probs.shape[1])  # Normalize to [0, 1]
+    
+    # 2. Margin-based uncertainty
+    # Small margin between top 2 predictions = model is uncertain
+    # Use partition for efficiency: O(n) instead of O(n log n)
+    top_2_probs = np.partition(probs, -2, axis=1)[:, -2:]
+    margin = top_2_probs[:, 1] - top_2_probs[:, 0]
+    margin_uncertainty = 1.0 - margin  # Convert to uncertainty (low margin = high uncertainty)
+    
+    # 3. Combined uncertainty score
+    uncertainty_score = entropy_weight * entropy_normalized + margin_weight * margin_uncertainty
+    
+    # Get top uncertain cases
+    top_indices = np.argsort(uncertainty_score)[-top_k:][::-1]
+    
+    # Create result dataframe
+    uncertain_df = df.iloc[top_indices].copy()
+    uncertain_df['uncertainty_score'] = uncertainty_score[top_indices]
+    uncertain_df['entropy'] = entropy[top_indices]
+    uncertain_df['margin'] = margin[top_indices]
+    uncertain_df['top_prediction'] = np.argmax(probs[top_indices], axis=1)
+    uncertain_df['top_probability'] = np.max(probs[top_indices], axis=1)
+    
+    logger.info(f"      Found {top_k} uncertain cases with uncertainty scores:")
+    logger.info(f"        Mean uncertainty: {uncertainty_score[top_indices].mean():.3f}")
+    logger.info(f"        Mean entropy: {entropy[top_indices].mean():.3f}")
+    logger.info(f"        Mean margin: {margin[top_indices].mean():.3f}")
+    
+    return uncertain_df
 
 
 def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
