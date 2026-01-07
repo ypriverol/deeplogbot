@@ -87,3 +87,50 @@ classification:
     min_total_downloads: 1000
     low_entropy_quantile: 0.2
 
+  # Detailed category classification rules
+  categories:
+    ci_cd_pipeline:
+      description: "Automated CI/CD pipelines downloading test data"
+      max_users: 10
+      min_downloads_per_user: 50
+      max_downloads_per_user: 500
+      max_file_diversity_ratio: 0.3
+      min_regularity_score: 0.8
+      
+    research_group:
+      description: "Research labs and academic groups"
+      min_users: 5
+      max_users: 50
+      min_downloads_per_user: 10
+      max_downloads_per_user: 100
+      min_working_hours_ratio: 0.5
+      min_file_diversity_ratio: 0.3
+      
+    bulk_downloader:
+      description: "Individual power users downloading large datasets"
+      max_users: 5
+      min_downloads_per_user: 100
+      max_downloads_per_user: 500
+      
+    course_workshop:
+      description: "Educational courses and workshops"
+      min_users: 50
+      max_users: 500
+      min_downloads_per_user: 5
+      max_downloads_per_user: 20
+      max_file_diversity_ratio: 0.3
+      
+    automated_sync:
+      description: "Automated sync/mirror scripts"
+      max_users: 3
+      min_downloads_per_user: 500
+      min_regularity_score: 1.0
+      
+    api_client:
+      description: "Programmatic API access from tools"
+      min_users: 10
+      max_users: 500
+      min_downloads_per_user: 5
+      max_downloads_per_user: 50
+      min_working_hours_ratio: 0.4
+
