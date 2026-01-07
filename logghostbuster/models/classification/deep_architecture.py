@@ -80,6 +80,14 @@ import warnings
 
 from ...utils import logger
 from ..isoforest.models import train_isolation_forest
+from ...config import (
+    get_hub_protection_rules,
+    get_bot_detection_rules,
+    get_bot_score_weights,
+    get_bot_thresholds,
+    get_download_hub_thresholds,
+    get_independent_user_thresholds,
+)
 
 # Try to import HDBSCAN, fall back to DBSCAN if not available
 try:
@@ -1112,6 +1120,13 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
     Returns:
         Tuple of (hard_labels, soft_labels) as numpy arrays
     """
+    # Get configuration values
+    hub_rules = get_hub_protection_rules()
+    bot_rules = get_bot_detection_rules()
+    weights = get_bot_score_weights()
+    thresholds = get_bot_thresholds()
+    hub_thresholds = get_download_hub_thresholds()
+    
     # Initialize bot score (0-1)
     bot_score = np.zeros(len(df))
     
@@ -1120,10 +1135,16 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
     # =========================================================================
     is_definite_hub = pd.Series(False, index=df.index)
     if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        high_dl_rule = hub_rules.get('high_dl_per_user', {})
+        few_users_rule = hub_rules.get('few_users_high_dl', {})
+        single_user_rule = hub_rules.get('single_user', {})
+        
         is_definite_hub = (
-            (df['downloads_per_user'] > 500) |  # Very high DL/user = always hub
-            ((df['unique_users'] <= 100) & (df['downloads_per_user'] > 100)) |  # Small + high DL/user
-            ((df['unique_users'] == 1) & (df['downloads_per_user'] > 50))  # Single user + moderate DL
+            (df['downloads_per_user'] > high_dl_rule.get('min_downloads_per_user', 500)) |  # Very high DL/user = always hub
+            ((df['unique_users'] <= few_users_rule.get('max_users', 100)) & 
+             (df['downloads_per_user'] > few_users_rule.get('min_downloads_per_user', 100))) |  # Small + high DL/user
+            ((df['unique_users'] <= single_user_rule.get('max_users', 1)) & 
+             (df['downloads_per_user'] > single_user_rule.get('min_downloads_per_user', 50)))  # Single user + moderate DL
         )
     
     # Ensure definite hubs get zero bot score (apply BEFORE any bot scoring)
@@ -1132,10 +1153,14 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
     # Also keep backward compatibility with old hub identification
     is_download_hub = pd.Series(False, index=df.index)
     if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        standard_hub = hub_thresholds.get('standard', {})
+        definite_hub = hub_thresholds.get('definite', {})
+        
         # Hub pattern: Very high DL/user with few users
         is_download_hub = (
-            ((df['downloads_per_user'] > 500) & (df['unique_users'] < 100)) |
-            (df['downloads_per_user'] > 1000)  # Extreme DL/user is always a hub
+            ((df['downloads_per_user'] > standard_hub.get('min_downloads_per_user', 500)) & 
+             (df['unique_users'] < standard_hub.get('max_users', 100))) |
+            (df['downloads_per_user'] > definite_hub.get('min_downloads_per_user', 1000))  # Extreme DL/user is always a hub
         )
     
     # Merge both hub identifications
@@ -1147,63 +1172,67 @@ def generate_smart_bot_labels(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]
     
     # Signal 1: Many users with low DL/user (classic bot farm pattern)
     if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        many_users_rule = bot_rules.get('many_users_low_dl', {})
+        very_many_rule = bot_rules.get('very_many_users_moderate_dl', {})
+        moderate_rule = bot_rules.get('moderate_users_suspicious', {})
+        
         # Bot pattern: Many users, low DL/user
         many_users_low_dl = (
-            (df['unique_users'] > 1000) &  # Many users
-            (df['downloads_per_user'] < 20) &  # Low DL/user
+            (df['unique_users'] > many_users_rule.get('min_users', 1000)) &  # Many users
+            (df['downloads_per_user'] < many_users_rule.get('max_downloads_per_user', 20)) &  # Low DL/user
             ~is_hub  # NOT a hub
         )
-        bot_score[many_users_low_dl] += 0.7
+        bot_score[many_users_low_dl] += weights.get('many_users_low_dl', 0.7)
         
         # Bot pattern: Very many users, moderate DL/user
         very_many_users_moderate_dl = (
-            (df['unique_users'] > 5000) &  # Very many users
-            (df['downloads_per_user'] >= 20) &
-            (df['downloads_per_user'] < 100) &  # Moderate DL/user
+            (df['unique_users'] > very_many_rule.get('min_users', 5000)) &  # Very many users
+            (df['downloads_per_user'] >= very_many_rule.get('min_downloads_per_user', 20)) &
+            (df['downloads_per_user'] < very_many_rule.get('max_downloads_per_user', 100)) &  # Moderate DL/user
             ~is_hub
         )
-        bot_score[very_many_users_moderate_dl] += 0.6
+        bot_score[very_many_users_moderate_dl] += weights.get('very_many_users_moderate_dl', 0.6)
         
         # Bot pattern: Moderate users with suspicious DL/user ratio
         moderate_users_suspicious = (
-            (df['unique_users'] > 500) &
-            (df['unique_users'] <= 5000) &
-            (df['downloads_per_user'] > 10) &
-            (df['downloads_per_user'] < 50) &
+            (df['unique_users'] > moderate_rule.get('min_users', 500)) &
+            (df['unique_users'] <= moderate_rule.get('max_users', 5000)) &
+            (df['downloads_per_user'] > moderate_rule.get('min_downloads_per_user', 10)) &
+            (df['downloads_per_user'] < moderate_rule.get('max_downloads_per_user', 50)) &
             ~is_hub
         )
-        bot_score[moderate_users_suspicious] += 0.4
+        bot_score[moderate_users_suspicious] += weights.get('moderate_users_suspicious', 0.4)
     
     # Signal 2: High anomaly score (only for non-hubs)
     if 'anomaly_score' in df.columns:
-        high_anomaly_non_hub = (df['anomaly_score'] > BOT_THRESHOLDS['HIGH_ANOMALY_SCORE']) & ~is_hub
-        very_high_anomaly_non_hub = (df['anomaly_score'] > BOT_THRESHOLDS['VERY_HIGH_ANOMALY_SCORE']) & ~is_hub
-        bot_score[high_anomaly_non_hub] += 0.2
-        bot_score[very_high_anomaly_non_hub] += 0.15
+        high_anomaly_non_hub = (df['anomaly_score'] > thresholds.get('high_anomaly_score', 0.3)) & ~is_hub
+        very_high_anomaly_non_hub = (df['anomaly_score'] > thresholds.get('very_high_anomaly_score', 0.5)) & ~is_hub
+        bot_score[high_anomaly_non_hub] += weights.get('high_anomaly', 0.2)
+        bot_score[very_high_anomaly_non_hub] += weights.get('very_high_anomaly', 0.15)
     
     # Signal 3: Low working hours ratio with high activity (bots work 24/7)
     if _has_required_columns(df, 'working_hours_ratio', 'total_downloads', 'unique_users'):
         non_working_high_activity = (
-            (df['working_hours_ratio'] < BOT_THRESHOLDS['LOW_WORKING_HOURS_RATIO']) &
-            (df['total_downloads'] > BOT_THRESHOLDS['MIN_TOTAL_DOWNLOADS']) &
+            (df['working_hours_ratio'] < thresholds.get('low_working_hours_ratio', 0.3)) &
+            (df['total_downloads'] > thresholds.get('min_total_downloads', 1000)) &
             (df['unique_users'] > 100) &  # Bots have many users
             ~is_hub
         )
-        bot_score[non_working_high_activity] += 0.25
+        bot_score[non_working_high_activity] += weights.get('non_working_hours', 0.25)
     
     # Signal 4: Low hourly entropy (coordinated access patterns)
     if 'hourly_entropy' in df.columns and 'unique_users' in df.columns:
         low_entropy_many_users = (
-            (df['hourly_entropy'] < df['hourly_entropy'].quantile(BOT_THRESHOLDS['LOW_ENTROPY_QUANTILE'])) &
+            (df['hourly_entropy'] < df['hourly_entropy'].quantile(thresholds.get('low_entropy_quantile', 0.25))) &
             (df['unique_users'] > 100) &  # Bots have many users
             ~is_hub
         )
-        bot_score[low_entropy_many_users] += 0.15
+        bot_score[low_entropy_many_users] += weights.get('low_entropy', 0.15)
     
     # Signal 5: Original rule-based bot classification (only for bots, NOT hubs)
     if 'user_category' in df.columns:
         rule_bot = df['user_category'] == 'bot'
-        bot_score[rule_bot & ~is_hub] += 0.5
+        bot_score[rule_bot & ~is_hub] += weights.get('rule_based_bot', 0.5)
         # NOTE: We do NOT add score for hubs anymore!
     
     # =========================================================================
@@ -1257,6 +1286,9 @@ def _apply_hub_protection(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame with hub protection applied
     """
+    # Get hub protection rules from config
+    hub_rules = get_hub_protection_rules()
+    
     # Initialize is_protected_hub column if not exists
     if 'is_protected_hub' not in df.columns:
         df['is_protected_hub'] = False
@@ -1265,15 +1297,23 @@ def _apply_hub_protection(df: pd.DataFrame) -> pd.DataFrame:
     definite_hub_mask = pd.Series(False, index=df.index)
     
     if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
+        high_dl_rule = hub_rules.get('high_dl_per_user', {})
+        few_users_rule = hub_rules.get('few_users_high_dl', {})
+        single_user_rule = hub_rules.get('single_user', {})
+        very_few_rule = hub_rules.get('very_few_users', {})
+        
         definite_hub_mask = (
             # Very high DL/user (institutional mirrors)
-            (df['downloads_per_user'] > 500) |
+            (df['downloads_per_user'] > high_dl_rule.get('min_downloads_per_user', 500)) |
             # Few users with high DL/user (research labs, automated systems)
-            ((df['unique_users'] <= 100) & (df['downloads_per_user'] > 100)) |
+            ((df['unique_users'] <= few_users_rule.get('max_users', 100)) & 
+             (df['downloads_per_user'] > few_users_rule.get('min_downloads_per_user', 100))) |
             # Single user with moderate+ DL/user (individual heavy downloaders)
-            ((df['unique_users'] == 1) & (df['downloads_per_user'] > 50)) |
+            ((df['unique_users'] <= single_user_rule.get('max_users', 1)) & 
+             (df['downloads_per_user'] > single_user_rule.get('min_downloads_per_user', 50))) |
             # Very few users (≤10) with high activity
-            ((df['unique_users'] <= 10) & (df['downloads_per_user'] > 200))
+            ((df['unique_users'] <= very_few_rule.get('max_users', 10)) & 
+             (df['downloads_per_user'] > very_few_rule.get('min_downloads_per_user', 200)))
         )
     
     # Mark as protected hub
@@ -2905,19 +2945,26 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     # =========================================================================
     logger.info("    Step 1: Identifying download hubs (protected from bot override)...")
     
+    # Get hub thresholds from config
+    hub_thresholds = get_download_hub_thresholds()
+    hub_rules = get_hub_protection_rules()
+    standard_hub = hub_thresholds.get('standard', {})
+    definite_hub = hub_thresholds.get('definite', {})
+    few_users_rule = hub_rules.get('few_users_high_dl', {})
+    
     download_hub_mask = pd.Series(False, index=df.index)
     if _has_required_columns(df, 'downloads_per_user', 'unique_users', 'total_downloads'):
         # Pattern 1: Very high DL/user with few users (mirrors, institutional)
         hub_pattern_mirror = (
-            (df['downloads_per_user'] > 500) & 
-            (df['unique_users'] < 100)
+            (df['downloads_per_user'] > standard_hub.get('min_downloads_per_user', 500)) & 
+            (df['unique_users'] < standard_hub.get('max_users', 100))
         )
         
         # Pattern 2: High total downloads with moderate DL/user and regular working hours
         hub_pattern_institution = (
             (df['total_downloads'] > 100000) & 
             (df['downloads_per_user'] > 50) & 
-            (df['downloads_per_user'] < 500) &
+            (df['downloads_per_user'] < standard_hub.get('min_downloads_per_user', 500)) &
             (df['unique_users'] < 500)
         )
         if 'working_hours_ratio' in df.columns:
@@ -2925,7 +2972,7 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         
         # Pattern 3: Extreme DL/user (automated sync, data mirrors)
         hub_pattern_extreme = (
-            (df['downloads_per_user'] > 1000)
+            (df['downloads_per_user'] > definite_hub.get('min_downloads_per_user', 1000))
         )
         
         download_hub_mask = hub_pattern_mirror | hub_pattern_institution | hub_pattern_extreme
@@ -2980,11 +3027,20 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         if enable_bot_head and bot_predictions is not None:
             df['is_bot_neural'] = bot_predictions == 1
             
+            # Get config rules
+            hub_rules = get_hub_protection_rules()
+            bot_override_rule = get_bot_detection_rules().get('bot_head_override', {})
+            high_dl_rule = hub_rules.get('high_dl_per_user', {})
+            very_few_rule = hub_rules.get('very_few_users', {})
+            few_users_rule = hub_rules.get('few_users_high_dl', {})
+            
             # NEVER classify as bot if definite hub pattern
             protected_from_bot = (
-                (df['downloads_per_user'] > 500) |  # High DL/user
-                ((df['unique_users'] <= 10) & (df['downloads_per_user'] > 100)) |  # Few users + high DL
-                ((df['unique_users'] <= 100) & (df['downloads_per_user'] > 200))  # Small scale + very high DL
+                (df['downloads_per_user'] > high_dl_rule.get('min_downloads_per_user', 500)) |  # High DL/user
+                ((df['unique_users'] <= very_few_rule.get('max_users', 10)) & 
+                 (df['downloads_per_user'] > few_users_rule.get('min_downloads_per_user', 100))) |  # Few users + high DL
+                ((df['unique_users'] <= few_users_rule.get('max_users', 100)) & 
+                 (df['downloads_per_user'] > very_few_rule.get('min_downloads_per_user', 200)))  # Small scale + very high DL
             )
             
             # Bot head override ONLY for non-hub locations with BOT patterns
@@ -2993,8 +3049,8 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 (bot_predictions == 1) & 
                 ~download_hub_mask &  # NOT a download hub
                 ~protected_from_bot &  # NOT protected from bot classification
-                (df['unique_users'] > 100) &  # Bots have many users
-                (df['downloads_per_user'] < 100)  # Bots have low-moderate DL/user
+                (df['unique_users'] > bot_override_rule.get('min_users', 100)) &  # Bots have many users
+                (df['downloads_per_user'] < bot_override_rule.get('max_downloads_per_user', 100))  # Bots have low-moderate DL/user
             )
             
             if bot_head_bots.any():
@@ -3059,13 +3115,16 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     # Final Safety Check: ensure no high DL/user locations are classified as bots
     # =========================================================================
     logger.info("    Performing final safety check...")
+    hub_rules = get_hub_protection_rules()
+    high_dl_rule = hub_rules.get('high_dl_per_user', {})
+    
     final_hub_override = (
         df['is_bot'] & 
-        (df['downloads_per_user'] > 500)
+        (df['downloads_per_user'] > high_dl_rule.get('min_downloads_per_user', 500))
     )
     if final_hub_override.any():
         logger.warning(f"    Final safety check: overriding {final_hub_override.sum()} "
-                       f"bot classifications with DL/user >500 to hub")
+                       f"bot classifications with DL/user >{high_dl_rule.get('min_downloads_per_user', 500)} to hub")
         df.loc[final_hub_override, 'is_bot'] = False
         df.loc[final_hub_override, 'is_download_hub'] = True
         df.loc[final_hub_override, 'user_category'] = 'download_hub'

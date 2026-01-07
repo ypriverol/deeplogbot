@@ -3,3 +3,87 @@ duckdb:
   max_temp_directory_size: "10GiB"
   temp_directory: "./duckdb-tmp/"
 
+# Classification rules for bot and hub detection
+classification:
+  # Hub protection rules - locations matching these are NEVER classified as bots
+  hub_protection:
+    # Very high downloads per user indicates institutional mirror
+    high_dl_per_user:
+      min_downloads_per_user: 500
+    # Few users with high download activity (research labs)
+    few_users_high_dl:
+      max_users: 100
+      min_downloads_per_user: 100
+    # Single user with moderate+ activity (heavy individual use)
+    single_user:
+      max_users: 1
+      min_downloads_per_user: 50
+    # Very few users with high activity
+    very_few_users:
+      max_users: 10
+      min_downloads_per_user: 200
+
+  # Bot detection rules
+  bot_detection:
+    # Ground truth bots - highest confidence
+    ground_truth:
+      min_users: 10000
+      max_downloads_per_user: 10
+    # Large scale bot patterns
+    large_scale:
+      min_users: 5000
+      max_downloads_per_user: 100
+    # Many users with low downloads per user
+    many_users_low_dl:
+      min_users: 1000
+      max_downloads_per_user: 20
+    # Very many users with moderate downloads
+    very_many_users_moderate_dl:
+      min_users: 5000
+      min_downloads_per_user: 20
+      max_downloads_per_user: 100
+    # Moderate users with suspicious pattern
+    moderate_users_suspicious:
+      min_users: 500
+      max_users: 5000
+      min_downloads_per_user: 10
+      max_downloads_per_user: 50
+    # Bot head override protection
+    bot_head_override:
+      min_users: 100
+      max_downloads_per_user: 100
+
+  # Download hub thresholds
+  download_hub:
+    # Definite hub - very high downloads per user
+    definite:
+      min_downloads_per_user: 1000
+    # Standard hub threshold
+    standard:
+      min_downloads_per_user: 500
+      max_users: 100
+
+  # Independent user thresholds
+  independent_user:
+    max_users: 5
+    max_downloads_per_user: 3
+
+  # Bot score weights for smart label generation
+  bot_score_weights:
+    many_users_low_dl: 0.7
+    very_many_users_moderate_dl: 0.6
+    moderate_users_suspicious: 0.4
+    high_anomaly: 0.2
+    very_high_anomaly: 0.15
+    non_working_hours: 0.25
+    low_entropy: 0.15
+    rule_based_bot: 0.5
+
+  # Thresholds for bot detection
+  bot_thresholds:
+    high_anomaly_score: 0.3
+    very_high_anomaly_score: 0.5
+    low_working_hours_ratio: 0.3
+    min_total_downloads: 1000
+    low_entropy_quantile: 0.25
+
