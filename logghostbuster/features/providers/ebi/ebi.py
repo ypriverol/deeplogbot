@@ -13,9 +13,10 @@ import numpy as np
 from typing import Optional, List
 from scipy import stats
 
-from ..base import BaseFeatureExtractor
-from ..schema import LogSchema, EBI_SCHEMA
-from ...utils import logger
+from ...base import BaseFeatureExtractor
+from ...schema import LogSchema
+from .schema import LogEbiSchema, EBI_SCHEMA
+from ....utils import logger
 
 
 # ============================================================================

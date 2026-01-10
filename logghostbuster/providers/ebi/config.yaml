@@ -1,0 +1,441 @@
+# =============================================================================
+# EBI Provider Configuration - PRIDE Database Download Logs
+# =============================================================================
+# This configuration extends the base taxonomy with thresholds specific to
+# EBI/PRIDE database download patterns.
+#
+# PRIDE is a proteomics data repository with specific access patterns:
+# - Research institutions downloading large datasets
+# - Individual researchers accessing specific projects
+# - Mirrors syncing entire collections
+# - Automated pipelines for data processing
+# =============================================================================
+
+provider:
+  name: "ebi"
+  display_name: "EBI PRIDE Database"
+  version: "1.0"
+  description: "Configuration for European Bioinformatics Institute PRIDE database logs"
+  base_taxonomy: "base"  # Extends base_taxonomy.yaml
+
+# =============================================================================
+# DATA CHARACTERISTICS
+# =============================================================================
+# Describes the scale and characteristics of this data source.
+# Used to calibrate thresholds appropriately.
+
+data_characteristics:
+  typical_downloads_per_day: 500000
+  typical_unique_locations: 50000
+  typical_users_per_location: 1-100000
+  typical_downloads_per_user: 1-10000
+  data_type: "proteomics research data"
+  file_sizes: "1MB - 100GB"
+
+# =============================================================================
+# SCHEMA MAPPING
+# =============================================================================
+# Maps log fields to standard feature names
+
+schema:
+  location_field: "geo_location"
+  country_field: "country"
+  city_field: "geoip_city_name"
+  user_field: "user"
+  project_field: "accession"
+  timestamp_field: "timestamp"
+  year_field: "year"
+
+  # Filtering thresholds
+  min_location_downloads: 1
+  min_year: 2020
+
+  # Time settings (UTC)
+  working_hours_start: 9
+  working_hours_end: 17
+  night_hours_start: 22
+  night_hours_end: 6
+
+# =============================================================================
+# TAXONOMY OVERRIDES
+# =============================================================================
+# Override base taxonomy thresholds for EBI/PRIDE scale
+
+taxonomy:
+  name: "pride_download_logs"
+  version: "1.0"
+  description: "Hierarchical classification for PRIDE database download patterns"
+
+# Level 1: Behavior Type - EBI-specific thresholds
+behavior_type:
+  organic:
+    patterns:
+      - id: working_hours_human
+        working_hours_ratio:
+          min: 0.4
+        regularity_score:
+          max: 0.6
+
+      - id: irregular_intervals
+        interval_cv:
+          min: 0.7
+
+      - id: low_user_count_organic
+        unique_users:
+          max: 50
+        downloads_per_user:
+          min: 1
+          max: 200
+
+  automated:
+    patterns:
+      - id: high_regularity
+        regularity_score:
+          min: 0.7
+
+      - id: non_working_hours
+        working_hours_ratio:
+          max: 0.25
+        night_activity_ratio:
+          min: 0.35
+
+      - id: high_coordination
+        user_coordination_score:
+          min: 0.6
+        unique_users:
+          min: 100
+
+      - id: very_high_volume
+        downloads_per_user:
+          min: 500
+
+      - id: many_users_pattern
+        unique_users:
+          min: 1000
+        downloads_per_user:
+          max: 50
+
+# Level 2: Automation Category - EBI-specific thresholds
+automation_category:
+  bot:
+    patterns:
+      - id: many_users_low_dl
+        unique_users:
+          min: 1000
+        downloads_per_user:
+          max: 50
+
+      - id: coordinated_bot_activity
+        user_coordination_score:
+          min: 0.7
+        user_authenticity_score:
+          max: 0.4
+
+      - id: ground_truth_bot
+        description: "EBI ground truth - extremely many users with minimal activity"
+        unique_users:
+          min: 10000
+        downloads_per_user:
+          max: 10
+
+      - id: suspicious_timing
+        night_activity_ratio:
+          min: 0.5
+        unique_users:
+          min: 500
+        working_hours_ratio:
+          max: 0.2
+
+  legitimate_automation:
+    patterns:
+      - id: mirror_pattern
+        downloads_per_user:
+          min: 500
+        unique_users:
+          max: 100
+
+      - id: institutional_hub_pattern
+        total_downloads:
+          min: 100000
+        downloads_per_user:
+          min: 50
+          max: 500
+        working_hours_ratio:
+          min: 0.25
+
+      - id: ci_cd_pattern
+        unique_users:
+          max: 10
+        regularity_score:
+          min: 0.7
+        downloads_per_user:
+          min: 20
+          max: 500
+
+      - id: automated_sync_pattern
+        unique_users:
+          max: 5
+        regularity_score:
+          min: 0.6
+        downloads_per_user:
+          min: 50
+
+# Level 3: Subcategories - EBI-specific thresholds
+subcategories:
+  # ORGANIC
+  individual_user:
+    parent: organic
+    unique_users:
+      max: 5
+    downloads_per_user:
+      max: 30
+
+  research_group:
+    parent: organic
+    unique_users:
+      min: 5
+      max: 50
+    working_hours_ratio:
+      min: 0.35
+    downloads_per_user:
+      max: 100
+
+  casual_bulk:
+    parent: organic
+    unique_users:
+      max: 10
+    downloads_per_user:
+      min: 30
+      max: 300
+    working_hours_ratio:
+      min: 0.3
+
+  # BOT
+  scraper_bot:
+    parent: bot
+    unique_users:
+      min: 5000
+    downloads_per_user:
+      max: 20
+
+  crawler_bot:
+    parent: bot
+    unique_users:
+      min: 1000
+      max: 5000
+    downloads_per_user:
+      min: 20
+      max: 100
+
+  coordinated_bot:
+    parent: bot
+    user_coordination_score:
+      min: 0.7
+    unique_users:
+      min: 500
+
+  # LEGITIMATE_AUTOMATION
+  mirror:
+    parent: legitimate_automation
+    downloads_per_user:
+      min: 500
+    unique_users:
+      max: 10
+
+  institutional_hub:
+    parent: legitimate_automation
+    total_downloads:
+      min: 50000
+    downloads_per_user:
+      min: 50
+      max: 500
+    working_hours_ratio:
+      min: 0.25
+
+  ci_cd_pipeline:
+    parent: legitimate_automation
+    unique_users:
+      max: 10
+    regularity_score:
+      min: 0.7
+
+  course_workshop:
+    parent: legitimate_automation
+    description: "Bioinformatics courses and workshops downloading PRIDE data"
+    unique_users:
+      min: 20
+      max: 200
+    downloads_per_user:
+      min: 3
+      max: 30
+    working_hours_ratio:
+      min: 0.4
+
+  data_aggregator:
+    parent: legitimate_automation
+    downloads_per_user:
+      min: 100
+    unique_users:
+      max: 50
+
+# =============================================================================
+# CLASSIFICATION RULES (for rule-based method)
+# =============================================================================
+# These are used by --classification-method rules
+
+rule_based:
+  bots:
+    description: "Bot detection rules for EBI/PRIDE logs"
+    require_anomaly: true
+    patterns:
+      - id: high_users_low_dl
+        description: "High user count with very low downloads per user"
+        unique_users:
+          min: 7000
+        downloads_per_user:
+          max: 12
+
+      - id: very_high_users_moderate_dl
+        description: "Very high user count with moderate downloads per user"
+        unique_users:
+          min: 25000
+        downloads_per_user:
+          min: 10
+          max: 100
+
+      - id: high_users_moderate_low_dl
+        description: "High user count with moderate-low downloads per user"
+        unique_users:
+          min: 15000
+        downloads_per_user:
+          min: 8
+          max: 80
+
+  hubs:
+    description: "Download hub detection rules for EBI/PRIDE logs"
+    require_anomaly: true
+    patterns:
+      - id: mirrors
+        description: "Very high downloads per user (mirrors/single-user hubs)"
+        downloads_per_user:
+          min: 500
+
+      - id: research_institutions
+        description: "High total downloads with moderate DL/user and working hours"
+        total_downloads:
+          min: 150000
+        downloads_per_user:
+          min: 50
+          max: 500
+        unique_users:
+          min: 1000
+        working_hours_ratio:
+          min: 0.25
+
+  independent_users:
+    description: "Legitimate individual users"
+    patterns:
+      - id: low_users_low_dl
+        unique_users:
+          max: 5
+        downloads_per_user:
+          max: 3
+        anomaly_score:
+          max: 0.1
+
+# =============================================================================
+# DEEP CLASSIFICATION SETTINGS
+# =============================================================================
+# Settings specific to the deep learning classification method
+
+deep_classification:
+  # Stratified pre-filtering thresholds
+  stratified_prefiltering:
+    obvious_bots:
+      min_users: 2000
+      many_users_low_dl:
+        min_users: 500
+        max_downloads_per_user: 100
+      large_scale_low_dl:
+        min_users: 100
+        max_downloads_per_user: 200
+
+    obvious_legitimate:
+      max_users: 5
+      max_downloads_per_user: 3
+      max_total_downloads: 50
+      max_anomaly_score: 0.15
+
+  # Hub protection rules
+  hub_protection:
+    high_dl_per_user:
+      min_downloads_per_user: 500
+    few_users_high_dl:
+      max_users: 100
+      min_downloads_per_user: 100
+    single_user:
+      max_users: 1
+      min_downloads_per_user: 50
+    very_few_users:
+      max_users: 10
+      min_downloads_per_user: 200
+
+  # Bot detection thresholds
+  bot_detection:
+    ground_truth:
+      min_users: 10000
+      max_downloads_per_user: 10
+    large_scale:
+      min_users: 5000
+      max_downloads_per_user: 100
+    many_users_low_dl:
+      min_users: 1000
+      max_downloads_per_user: 20
+
+  # Bot score weights
+  bot_score_weights:
+    many_users_low_dl: 0.7
+    very_many_users_moderate_dl: 0.6
+    moderate_users_suspicious: 0.4
+    high_anomaly: 0.2
+    very_high_anomaly: 0.15
+    non_working_hours: 0.25
+    low_entropy: 0.15
+    rule_based_bot: 0.5
+
+  # Thresholds
+  bot_thresholds:
+    high_anomaly_score: 0.2
+    very_high_anomaly_score: 0.25
+    low_working_hours_ratio: 0.3
+    min_total_downloads: 1000
+    low_entropy_quantile: 0.2
+
+# =============================================================================
+# FEATURE EXTRACTION SETTINGS
+# =============================================================================
+
+feature_extraction:
+  # Which extractors to use
+  extractors:
+    - YearlyPatternExtractor
+    - TimeOfDayExtractor
+    - CountryLevelExtractor
+    - TimeWindowExtractor
+
+  # Advanced behavioral features (for deep method)
+  behavioral_features:
+    enabled: true
+    features:
+      - burst_patterns
+      - circadian_rhythms
+      - user_coordination
+      - session_patterns
+
+  # Discriminative features (for deep method)
+  discriminative_features:
+    enabled: true
+    features:
+      - malicious_bot_score
+      - legitimate_automation_score
+      - geographic_stability

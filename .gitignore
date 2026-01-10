@@ -220,3 +220,13 @@ docs/2407.05639v2.pdf
 # Cursor context files
 cursor_context/
 .DS_Store
+docs/
+output/
+paper/*.out
+paper/*.log
+paper/*.aux
+paper/*.blg
+paper/*.bbl
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.fls

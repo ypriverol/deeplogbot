@@ -1,11 +1,11 @@
 """Base classes for extensible feature extractors."""
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import TYPE_CHECKING
 import pandas as pd
 
-from .schema import LogSchema
-from ..utils import logger
+if TYPE_CHECKING:
+    from .providers.ebi import LogSchema
 
 
 class BaseFeatureExtractor(ABC):
@@ -23,7 +23,7 @@ class BaseFeatureExtractor(ABC):
                 return df
     """
     
-    def __init__(self, schema: LogSchema):
+    def __init__(self, schema: "LogSchema"):
         """
         Initialize feature extractor with a schema.
         

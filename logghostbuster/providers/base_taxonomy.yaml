@@ -1,0 +1,338 @@
+# =============================================================================
+# BASE TAXONOMY - LogGhostbuster Hierarchical Classification
+# =============================================================================
+# This file defines the base taxonomy structure for classifying download behavior.
+# Providers can extend or override these definitions in their own config.yaml.
+#
+# The taxonomy has three levels:
+#   Level 1: behavior_type (ORGANIC vs AUTOMATED)
+#   Level 2: automation_category (BOT vs LEGITIMATE_AUTOMATION) - only for AUTOMATED
+#   Level 3: subcategory (detailed classification)
+#
+# Each provider should define thresholds appropriate for their data scale.
+# =============================================================================
+
+taxonomy:
+  name: "base"
+  version: "1.0"
+  description: "Base hierarchical classification taxonomy for download patterns"
+
+# =============================================================================
+# LEVEL 1: BEHAVIOR TYPE
+# =============================================================================
+# Distinguishes human-like (organic) from programmatic (automated) behavior.
+# These are the base patterns - providers should override thresholds.
+
+behavior_type:
+  organic:
+    description: "Human-like download patterns with irregular timing and working hours activity"
+    # Features that indicate organic behavior (any pattern match = organic)
+    indicators:
+      - working_hours_ratio    # High = organic (humans work during day)
+      - interval_cv            # High = organic (irregular intervals)
+      - regularity_score       # Low = organic (irregular patterns)
+    patterns:
+      - id: working_hours_human
+        description: "Activity concentrated during working hours with irregular patterns"
+        working_hours_ratio:
+          min: 0.4  # Override in provider config
+        regularity_score:
+          max: 0.6  # Override in provider config
+
+      - id: irregular_intervals
+        description: "Highly variable download intervals (human-like)"
+        interval_cv:
+          min: 0.7  # Override in provider config
+
+      - id: low_user_count_organic
+        description: "Few users with moderate activity (individuals/small groups)"
+        unique_users:
+          max: 50   # Override based on data scale
+        downloads_per_user:
+          min: 1
+          max: 200  # Override based on data scale
+
+  automated:
+    description: "Programmatic download patterns with regular timing or high coordination"
+    # Features that indicate automated behavior (any pattern match = automated)
+    indicators:
+      - regularity_score       # High = automated
+      - night_activity_ratio   # High = automated
+      - user_coordination_score # High = automated
+    patterns:
+      - id: high_regularity
+        description: "Very regular download intervals (automated scripts)"
+        regularity_score:
+          min: 0.7  # Override in provider config
+
+      - id: non_working_hours
+        description: "Activity outside working hours (servers/bots)"
+        working_hours_ratio:
+          max: 0.25
+        night_activity_ratio:
+          min: 0.35
+
+      - id: high_coordination
+        description: "Coordinated multi-user activity (bot farms/automation)"
+        user_coordination_score:
+          min: 0.6
+        unique_users:
+          min: 100  # Override based on data scale
+
+      - id: very_high_volume
+        description: "Extremely high download volume per user (mirrors/automation)"
+        downloads_per_user:
+          min: 500  # Override based on data scale
+
+      - id: many_users_pattern
+        description: "Many users with similar low-activity pattern (bots)"
+        unique_users:
+          min: 1000  # Override based on data scale
+        downloads_per_user:
+          max: 50    # Override based on data scale
+
+# =============================================================================
+# LEVEL 2: AUTOMATION CATEGORY
+# =============================================================================
+# Only applies when behavior_type = AUTOMATED
+# Distinguishes suspicious bots from legitimate automation
+
+automation_category:
+  bot:
+    description: "Suspicious or malicious automated activity"
+    # Indicators of bot behavior
+    indicators:
+      - user_authenticity_score  # Low = bot
+      - user_coordination_score  # High + low authenticity = bot
+    patterns:
+      - id: many_users_low_dl
+        description: "Many users with suspiciously low downloads per user (bot farm signature)"
+        unique_users:
+          min: 1000  # Override based on data scale
+        downloads_per_user:
+          max: 50    # Override based on data scale
+
+      - id: coordinated_bot_activity
+        description: "Highly coordinated suspicious activity"
+        user_coordination_score:
+          min: 0.7
+        user_authenticity_score:
+          max: 0.4
+
+      - id: ground_truth_bot
+        description: "Definitive bot pattern - extremely many users with minimal activity"
+        unique_users:
+          min: 10000  # Override based on data scale
+        downloads_per_user:
+          max: 10     # Override based on data scale
+
+      - id: suspicious_timing
+        description: "Suspicious timing patterns outside normal hours"
+        night_activity_ratio:
+          min: 0.5
+        unique_users:
+          min: 500   # Override based on data scale
+        working_hours_ratio:
+          max: 0.2
+
+  legitimate_automation:
+    description: "Benign automated systems (mirrors, CI/CD, institutional hubs)"
+    # Indicators of legitimate automation
+    indicators:
+      - downloads_per_user     # Very high = mirror
+      - regularity_score       # High + few users = CI/CD
+      - working_hours_ratio    # Moderate + high volume = institution
+    patterns:
+      - id: mirror_pattern
+        description: "Institutional mirror - very high downloads per user, few users"
+        downloads_per_user:
+          min: 500   # Override based on data scale
+        unique_users:
+          max: 100   # Override based on data scale
+
+      - id: institutional_hub_pattern
+        description: "Research institution hub - high volume with working hours activity"
+        total_downloads:
+          min: 100000  # Override based on data scale
+        downloads_per_user:
+          min: 50
+          max: 500
+        working_hours_ratio:
+          min: 0.25
+
+      - id: ci_cd_pattern
+        description: "CI/CD pipeline - few users, high regularity, same files"
+        unique_users:
+          max: 10
+        regularity_score:
+          min: 0.7
+        downloads_per_user:
+          min: 20
+          max: 500
+
+      - id: automated_sync_pattern
+        description: "Automated sync/backup systems"
+        unique_users:
+          max: 5
+        regularity_score:
+          min: 0.6
+        downloads_per_user:
+          min: 50
+
+# =============================================================================
+# LEVEL 3: SUBCATEGORIES
+# =============================================================================
+# Detailed classification within each parent category.
+# Providers can add custom subcategories specific to their domain.
+
+subcategories:
+  # ---- ORGANIC subcategories ----
+  individual_user:
+    parent: organic
+    description: "Single researchers or casual users"
+    unique_users:
+      max: 5
+    downloads_per_user:
+      max: 30
+
+  research_group:
+    parent: organic
+    description: "Small academic teams (5-50 users)"
+    unique_users:
+      min: 5
+      max: 50
+    working_hours_ratio:
+      min: 0.35
+    downloads_per_user:
+      max: 100
+
+  casual_bulk:
+    parent: organic
+    description: "Individual heavy downloaders with human patterns"
+    unique_users:
+      max: 10
+    downloads_per_user:
+      min: 30
+      max: 300
+    working_hours_ratio:
+      min: 0.3
+
+  # ---- BOT subcategories ----
+  scraper_bot:
+    parent: bot
+    description: "High-frequency automated scrapers"
+    unique_users:
+      min: 5000
+    downloads_per_user:
+      max: 20
+
+  crawler_bot:
+    parent: bot
+    description: "Systematic crawlers exploring the catalog"
+    unique_users:
+      min: 1000
+      max: 5000
+    downloads_per_user:
+      min: 20
+      max: 100
+
+  coordinated_bot:
+    parent: bot
+    description: "Bot farms with coordinated activity"
+    user_coordination_score:
+      min: 0.7
+    unique_users:
+      min: 500
+
+  generic_bot:
+    parent: bot
+    description: "Bot that doesn't match specific subcategories"
+    # Fallback for bots not matching other patterns
+
+  # ---- LEGITIMATE_AUTOMATION subcategories ----
+  mirror:
+    parent: legitimate_automation
+    description: "Institutional mirrors syncing full datasets"
+    downloads_per_user:
+      min: 500
+    unique_users:
+      max: 10
+
+  institutional_hub:
+    parent: legitimate_automation
+    description: "Research infrastructure hubs"
+    total_downloads:
+      min: 50000
+    downloads_per_user:
+      min: 50
+      max: 500
+    working_hours_ratio:
+      min: 0.25
+
+  ci_cd_pipeline:
+    parent: legitimate_automation
+    description: "Automated testing and build systems"
+    unique_users:
+      max: 10
+    regularity_score:
+      min: 0.7
+
+  course_workshop:
+    parent: legitimate_automation
+    description: "Educational courses and workshops"
+    unique_users:
+      min: 20
+      max: 200
+    downloads_per_user:
+      min: 3
+      max: 30
+    working_hours_ratio:
+      min: 0.4
+
+  data_aggregator:
+    parent: legitimate_automation
+    description: "Legitimate data aggregation services"
+    downloads_per_user:
+      min: 100
+    unique_users:
+      max: 50
+
+# =============================================================================
+# FEATURE REQUIREMENTS
+# =============================================================================
+# Lists the features required for classification.
+# Providers must ensure these features are extracted.
+
+required_features:
+  basic:
+    - unique_users
+    - downloads_per_user
+    - total_downloads
+  temporal:
+    - working_hours_ratio
+    - night_activity_ratio
+    - regularity_score
+    - interval_cv
+  behavioral:
+    - user_coordination_score
+    - user_authenticity_score
+  optional:
+    - hourly_entropy
+    - file_diversity_ratio
+    - session_count
+
+# =============================================================================
+# DERIVED COLUMNS
+# =============================================================================
+# Columns derived from hierarchical classification for backward compatibility
+
+derived_columns:
+  is_bot:
+    description: "True if automation_category == 'bot'"
+    condition: "automation_category == 'bot'"
+  is_download_hub:
+    description: "True if subcategory in hub types"
+    hub_subcategories:
+      - mirror
+      - institutional_hub
+      - data_aggregator

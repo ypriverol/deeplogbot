@@ -1,56 +1,53 @@
 # LogGhostbuster
 
-LogGhostbuster: A hybrid Isolation Forest-based system for detecting bot behavior in log data.
+LogGhostbuster: A hybrid machine learning system for detecting bot behavior and download patterns in log data.
 
 ## Overview
 
-LogGhostbuster is a hybrid machine learning system that detects bot behavior and download hubs in log data. It combines unsupervised anomaly detection with rule-based classification to identify suspicious download patterns.
+LogGhostbuster is a comprehensive machine learning system that detects bot behavior, download hubs, and various download patterns in log data. It offers multiple classification approaches: rule-based classification, supervised/unsupervised ML classification, and a novel pattern discovery architecture that uses deep learning to discover behavioral patterns automatically.
 
 ### Algorithm Overview
 
-The system follows a multi-stage pipeline:
+The system follows a multi-stage pipeline with multiple classification approaches:
 
 1. **Feature Extraction**: Extracts location-level behavioral features from log data:
    - User activity patterns (unique users, downloads per user, user density per hour)
    - Temporal patterns (hourly entropy, working hours ratio, yearly patterns)
    - Anomaly indicators (spike ratios, latest year concentration, new location flags)
    - Geographic patterns (country-level aggregations for coordinated detection)
+   - Behavioral features (temporal regularity, file diversity, session patterns) - for pattern discovery
 
-2. **Anomaly Detection**: Uses **Isolation Forest** to identify anomalous locations:
+2. **Anomaly Detection** (for rule-based/ML methods): Uses **Isolation Forest** to identify anomalous locations:
    - Isolation Forest is an unsupervised algorithm that isolates anomalies by randomly selecting features and split values
    - Locations with unusual behavioral patterns (short path lengths in the isolation tree) are flagged as anomalies
    - The contamination parameter controls the expected proportion of anomalies (default: 15%)
 
-3. **Classification**: Classifies anomalies into categories using either rule-based or ML-based methods:
-   
-   **Rule-based classification** (default): Uses a comprehensive set of pattern-based rules:
+3. **Classification**: Two classification methods available:
+
+   **Rule-based classification** (`--classification-method rules`, default): Uses a comprehensive set of pattern-based rules:
+   - Simple, fast classification using YAML-configurable rules
    - **BOT**: Detected when anomalies exhibit bot-like characteristics:
      - Low downloads per user (< 100) combined with high user counts (> 5K-30K users)
      - Sudden spikes in activity (high spike ratios and latest year concentration)
      - New locations with suspicious patterns
-     - Geographic bot farms (coordinated patterns across country-level metrics)
-   
    - **DOWNLOAD_HUB**: Detected when anomalies show hub-like characteristics:
      - Very high downloads per user (> 500) - mirrors/single-user hubs
-     - High total downloads (> 150K) with moderate downloads per user (50-500) and regular working hours patterns - research institutions
-   
-   **Supervised ML-based classification** (optional): Uses a RandomForestClassifier trained on rule-based labels:
-   - First generates training labels using rule-based classification
-   - Trains a multi-class classifier (BOT, DOWNLOAD_HUB, NORMAL) on behavioral features
-   - Can generalize better to edge cases and learn complex feature interactions
-   - Provides feature importance rankings for interpretability
-   - Use `--classification-method ml` to enable
-   
-   **Unsupervised ML-based classification** (optional): Uses KMeans clustering:
-   - Clusters locations into 3 groups based on behavioral features
-   - Maps clusters to bot/hub/normal based on cluster characteristics
-   - No labels required - fully unsupervised approach
-   - Useful when rule-based patterns may not capture all patterns
-   - Use `--classification-method ml-unsupervised` to enable
+     - High total downloads with regular institutional patterns
+   - Output: Hierarchical columns (`behavior_type`, `automation_category`, `subcategory`)
+
+   **Deep architecture classification** (`--classification-method deep`): Advanced deep learning approach with hierarchical classification:
+   - Combines Isolation Forest anomaly detection with Transformer-based pattern discovery
+   - **Hierarchical Classification**:
+     - **Level 1 (behavior_type)**: ORGANIC vs AUTOMATED
+     - **Level 2 (automation_category)**: BOT vs LEGITIMATE_AUTOMATION (for automated only)
+     - **Level 3 (subcategory)**: Detailed classification (mirror, ci_cd_pipeline, scraper_bot, etc.)
+   - **Advanced Features**: Extracts behavioral features including burst patterns, circadian rhythms, user coordination
+   - **Pattern Discovery**: Uses clustering to discover natural behavioral patterns
+   - Output: Hierarchical columns (`behavior_type`, `automation_category`, `subcategory`)
 
 4. **Geographic Grouping** (optional): Groups nearby hub locations using:
    - Haversine distance calculation (default: 10km threshold)
-   - Optional LLM-based canonical naming for institutions
+   - Geographic center-based canonical naming for institutions
 
 5. **Output Generation**: Produces annotated data and comprehensive reports with detection results.
 
@@ -58,6 +55,10 @@ The system follows a multi-stage pipeline:
 
 - **Bot downloads** - Automated downloads from bot farms (characterized by user ID cycling with low downloads per user)
 - **Download hubs** - Legitimate mirrors/institutions with high download volumes (characterized by high downloads per user or regular institutional patterns)
+- **Hierarchical Classification** (deep method) - Three-level taxonomy:
+  - **ORGANIC**: Human-like download patterns (individual users, research groups)
+  - **AUTOMATED > BOT**: Suspicious automation (scrapers, crawlers, coordinated bots)
+  - **AUTOMATED > LEGITIMATE_AUTOMATION**: Benign automation (mirrors, CI/CD, institutional hubs)
 
 ## Installation
 
@@ -85,7 +86,11 @@ Options:
 - `--contamination, -c`: Expected proportion of anomalies (default: 0.15)
 - `--compute-importances`: Compute feature importances (optional, slower)
 - `--sample-size, -s`: Randomly sample N records from all years before processing (e.g., 1000000 for 1M records)
-- `--classification-method, -m`: Classification method - `rules` for rule-based (default), `ml` for supervised ML-based, or `ml-unsupervised` for unsupervised ML-based
+- `--classification-method, -m`: Classification method:
+  - `rules` - Rule-based classification (default) - fast, hierarchical classification
+  - `deep` - Deep architecture with hierarchical classification (ORGANIC/AUTOMATED taxonomy)
+- `--provider, -p`: Log provider for configuration and rules (default: ebi). Use `--list-providers` to see available options.
+- `--list-providers`: List available log providers and exit
 
 ### Known Issues
 
@@ -96,14 +101,19 @@ Options:
 ```python
 from logghostbuster import run_bot_annotator
 
+# Using rules method (simple, fast)
 results = run_bot_annotator(
     input_parquet='data_downloads_parquet.parquet',
-    output_parquet='annotated_data.parquet',
     output_dir='output/bot_analysis',
-    contamination=0.15,
-    compute_importances=False,
+    classification_method='rules'  # Default - hierarchical classification
+)
+
+# Using deep method (hierarchical classification)
+results = run_bot_annotator(
+    input_parquet='data_downloads_parquet.parquet',
+    output_dir='output/bot_analysis',
+    classification_method='deep',  # Hierarchical: behavior_type, automation_category, subcategory
     sample_size=1000000,  # Optional: sample 1M records
-    classification_method='ml'  # 'rules' (default), 'ml' (supervised), or 'ml-unsupervised'
 )
 ```
 
@@ -127,6 +137,10 @@ results = run_bot_annotator(
     - `__init__.py` - Model exports
     - `models.py` - Isolation Forest training and feature importance
     - `classification.py` - Bot and download hub classification logic
+  - `models/` - Machine learning models package
+    - `classification/` - Classification models
+      - `deep_architecture.py` - Deep learning architecture for bot detection
+      - `pattern_discovery.py` - Pattern discovery using contrastive learning and clustering
   - `llm/` - LLM utilities package
     - `__init__.py` - LLM exports
     - `utils.py` - LLM utilities for canonical naming (optional)
@@ -134,6 +148,33 @@ results = run_bot_annotator(
     - `__init__.py` - Report exports
     - `annotation.py` - Annotation utilities for marking locations with bot/download_hub flags
     - `reporting.py` - Generic report generator
+
+## Provider System
+
+LogGhostbuster uses a provider-based architecture to support different log sources. Each provider defines its own schema, classification thresholds, and taxonomy.
+
+### Using Different Providers
+
+```bash
+# List available providers
+logghostbuster --list-providers
+
+# Use a specific provider (default: ebi)
+logghostbuster -i data.parquet -o output/ --provider ebi
+```
+
+### Creating Custom Providers
+
+To support a new log source, create a provider directory with a `config.yaml`:
+
+```
+logghostbuster/providers/my_provider/
+├── config.yaml     # Schema, thresholds, and taxonomy
+├── schema.py       # Optional: custom schema class
+└── extractors.py   # Optional: custom feature extractors
+```
+
+See `docs/providers.md` for detailed documentation.
 
 ## Custom Schemas and Feature Extractors
 
@@ -183,39 +224,92 @@ See `examples/custom_schema_example.py` for more detailed examples.
 
 ## Detection Methodology
 
+### Rule-based Method (`--classification-method rules`):
 1. Extract location-level features (users, downloads, patterns, time-of-day)
 2. Apply Isolation Forest anomaly detection
-3. Classify anomalies as:
-   - **BOT**: low downloads/user + many users
-   - **DOWNLOAD_HUB**: high downloads/user (mirrors) or high total downloads with regular patterns (research institutions)
-4. Group nearby hub locations using geographic distance + optional LLM consolidation
+3. Classify using YAML-configurable rules:
+   - **BOT**: low downloads/user + many users + anomalous behavior
+   - **DOWNLOAD_HUB**: high downloads/user (mirrors) or high total downloads with regular patterns
+4. Output: Hierarchical columns (`behavior_type`, `automation_category`, `subcategory`)
 
-## Environment Variables
+### Deep Method (`--classification-method deep`):
+1. Extract location-level features (basic + advanced behavioral)
+2. Apply Isolation Forest anomaly detection
+3. Extract advanced features:
+   - Burst patterns, circadian rhythms, user coordination
+   - Temporal sequences, file diversity, session patterns
+   - Discriminative features (malicious vs legitimate automation)
+4. Hierarchical classification:
+   - **Level 1**: ORGANIC (human-like) vs AUTOMATED (programmatic)
+   - **Level 2**: Within AUTOMATED: BOT vs LEGITIMATE_AUTOMATION
+   - **Level 3**: Subcategories (mirror, ci_cd_pipeline, scraper_bot, individual_user, etc.)
+5. Pattern discovery using clustering to identify natural behavioral groups
+6. Output: `behavior_type`, `automation_category`, `subcategory`
 
-- `USE_LLM_GROUPING`: Enable/disable LLM-based location grouping (default: `true`)
-- `HF_MODEL`: Hugging Face model name (default: `microsoft/DialoGPT-medium`)
+## Deep Method Details
+
+The deep architecture method (`--classification-method deep`) implements a sophisticated hierarchical classification:
+
+### Hierarchical Taxonomy
+```
+behavior_type (Level 1)
+├── ORGANIC (human-like patterns)
+│   ├── individual_user      - Single researchers or casual users
+│   ├── research_group       - Small academic teams (5-50 users)
+│   └── casual_bulk          - Individual heavy downloaders with human patterns
+│
+└── AUTOMATED (programmatic patterns)
+    ├── automation_category: BOT (suspicious/malicious)
+    │   ├── scraper_bot         - High-frequency automated scrapers
+    │   ├── crawler_bot         - Systematic crawlers
+    │   └── coordinated_bot     - Bot farms with coordinated activity
+    │
+    └── automation_category: LEGITIMATE_AUTOMATION (benign)
+        ├── mirror              - Institutional mirrors (very high DL/user)
+        ├── institutional_hub   - Research infrastructure hubs
+        ├── ci_cd_pipeline      - Automated testing/builds
+        ├── course_workshop     - Educational events
+        └── data_aggregator     - Legitimate data aggregation services
+```
+
+### Deep Learning Architecture
+- **Feature Extraction**: Advanced behavioral features (burst patterns, circadian rhythms, user coordination)
+- **Transformer Encoder**: Processes temporal sequences to learn behavioral embeddings
+- **Pattern Discovery**: Clustering to identify natural behavioral patterns
+- **Feature Validation**: Ensures behavioral features meet quality thresholds
+
+### Key Features
+- **Hierarchical**: Three-level classification (behavior_type → automation_category → subcategory)
+- **Configurable**: Taxonomy rules defined in YAML for easy customization
 
 ## Comparing Classification Methods
 
-A comparison script is provided to evaluate all three classification methods on the same dataset:
+To compare the two classification methods on the same dataset:
 
 ```bash
-python compare_classification_methods.py \
-    --input data_downloads_parquet.parquet \
-    --sample-size 3000000 \
-    --output-dir output/comparison
+# Run rules method
+logghostbuster -i data.parquet -o output/rules --classification-method rules
+
+# Run deep method
+logghostbuster -i data.parquet -o output/deep --classification-method deep
 ```
 
-This will:
-- Run all three methods (rules, supervised ML, unsupervised ML) on the same sampled data
-- Generate comparison reports showing differences between methods
-- Create CSV files with detailed comparison metrics
-- Save individual results for each method
+Compare the outputs in `location_analysis.csv` to see differences in classification results.
 
 ## Output
 
 The tool generates:
-- Annotated parquet file with `bot` and `download_hub` columns
-- `bot_detection_report.txt` - Comprehensive detection report
-- `location_analysis.csv` - Full analysis of all locations
-- `feature_importances/` - Feature importance analysis (if enabled)
+- Annotated parquet file with classification columns:
+  - `behavior_type`: 'organic' or 'automated'
+    - `automation_category`: 'bot' or 'legitimate_automation' (for automated only)
+    - `subcategory`: Detailed classification (mirror, scraper_bot, individual_user, etc.)
+- `bot_detection_report.txt` - Comprehensive detection report with classification breakdown
+- `location_analysis.csv` - Full analysis of all locations with features and classifications
+- `feature_importances/` - Feature importance analysis (if enabled with `--compute-importances`)
+
+### Deep Method Output
+When using `--classification-method deep`, the output includes:
+- Hierarchical classification columns: `behavior_type`, `automation_category`, `subcategory`
+- User category: `user_category` for legacy compatibility
+- Behavioral features: `regularity_score`, `working_hours_ratio`, `night_activity_ratio`, etc.
+- Confidence scores and validation metrics

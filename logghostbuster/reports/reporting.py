@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 from ..utils import logger, format_number, group_nearby_locations_with_llm
-from ..features.schema import LogSchema
+from ..features.providers.ebi import LogSchema
 
 
 class ReportGenerator:
@@ -330,24 +330,24 @@ class ReportGenerator:
         """Write detailed category breakdown section."""
         if 'detailed_category' not in df.columns:
             return
-        
+
         f.write("\n" + "=" * 80 + "\n")
         f.write("DETAILED CATEGORY BREAKDOWN\n")
         f.write("=" * 80 + "\n")
         f.write("Granular classification of location usage patterns:\n\n")
-        
+
         for category in df['detailed_category'].unique():
             if pd.isna(category):
                 continue
             cat_df = df[df['detailed_category'] == category]
             if len(cat_df) == 0:
                 continue
-            
+
             f.write(f"\n{category.upper()}: {len(cat_df):,} locations\n")
             f.write(f"  Total downloads: {cat_df['total_downloads'].sum():,.0f}\n")
             f.write(f"  Avg users: {cat_df['unique_users'].mean():.1f}\n")
             f.write(f"  Avg DL/user: {cat_df['downloads_per_user'].mean():.1f}\n")
-            
+
             # Add behavioral features if available
             if 'working_hours_ratio' in cat_df.columns:
                 f.write(f"  Avg working hours ratio: {cat_df['working_hours_ratio'].mean():.2f}\n")
@@ -355,6 +355,73 @@ class ReportGenerator:
                 f.write(f"  Avg file diversity: {cat_df['file_diversity_ratio'].mean():.2f}\n")
             if 'regularity_score' in cat_df.columns:
                 f.write(f"  Avg regularity score: {cat_df['regularity_score'].mean():.2f}\n")
+
+    def _write_hierarchical_classification_summary(self, f, df: pd.DataFrame):
+        """Write hierarchical classification summary section."""
+        # Check if hierarchical columns exist
+        if 'behavior_type' not in df.columns:
+            return
+
+        total = len(df)
+        if total == 0:
+            return
+
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("HIERARCHICAL CLASSIFICATION SUMMARY\n")
+        f.write("=" * 80 + "\n")
+        f.write("Classification taxonomy: ORGANIC vs AUTOMATED behavior\n\n")
+
+        # Level 1: Behavior Type
+        f.write("LEVEL 1 - BEHAVIOR TYPE\n")
+        f.write("-" * 40 + "\n")
+        for bt in ['organic', 'automated']:
+            bt_df = df[df['behavior_type'] == bt]
+            count = len(bt_df)
+            pct = count / total * 100 if total > 0 else 0
+            downloads = bt_df['total_downloads'].sum() if 'total_downloads' in bt_df.columns else 0
+            f.write(f"  {bt.upper()}: {count:,} locations ({pct:.1f}%)\n")
+            f.write(f"    Total downloads: {format_number(downloads)}\n")
+
+        # Level 2: Automation Category
+        if 'automation_category' in df.columns:
+            automated_df = df[df['behavior_type'] == 'automated']
+            automated_count = len(automated_df)
+
+            if automated_count > 0:
+                f.write("\nLEVEL 2 - AUTOMATION CATEGORY (within AUTOMATED)\n")
+                f.write("-" * 40 + "\n")
+                for ac in ['bot', 'legitimate_automation']:
+                    ac_df = automated_df[automated_df['automation_category'] == ac]
+                    count = len(ac_df)
+                    pct = count / automated_count * 100 if automated_count > 0 else 0
+                    downloads = ac_df['total_downloads'].sum() if 'total_downloads' in ac_df.columns else 0
+                    f.write(f"  {ac.upper()}: {count:,} locations ({pct:.1f}% of automated)\n")
+                    f.write(f"    Total downloads: {format_number(downloads)}\n")
+
+        # Level 3: Subcategories
+        if 'subcategory' in df.columns:
+            f.write("\nLEVEL 3 - SUBCATEGORIES\n")
+            f.write("-" * 40 + "\n")
+
+            # Group by parent category
+            organic_subcats = df[df['behavior_type'] == 'organic']['subcategory'].value_counts()
+            bot_subcats = df[df['automation_category'] == 'bot']['subcategory'].value_counts()
+            legit_subcats = df[df['automation_category'] == 'legitimate_automation']['subcategory'].value_counts()
+
+            f.write("\n  ORGANIC subcategories:\n")
+            for subcat, count in organic_subcats.items():
+                pct = count / total * 100
+                f.write(f"    {subcat}: {count:,} ({pct:.1f}%)\n")
+
+            f.write("\n  BOT subcategories:\n")
+            for subcat, count in bot_subcats.items():
+                pct = count / total * 100
+                f.write(f"    {subcat}: {count:,} ({pct:.1f}%)\n")
+
+            f.write("\n  LEGITIMATE_AUTOMATION subcategories:\n")
+            for subcat, count in legit_subcats.items():
+                pct = count / total * 100
+                f.write(f"    {subcat}: {count:,} ({pct:.1f}%)\n")
     
     
     def generate(self, df: pd.DataFrame, bot_locs: pd.DataFrame, hub_locs: pd.DataFrame, 
@@ -408,7 +475,10 @@ class ReportGenerator:
             if classification_method.lower() == 'deep':
                 if cluster_df is not None and not cluster_df.empty:
                     self._write_cluster_details(f, cluster_df)
-            
+
+            # Write hierarchical classification summary (new taxonomy)
+            self._write_hierarchical_classification_summary(f, df)
+
             self._write_detailed_category_breakdown(f, df)
 
             self._write_city_level_aggregation(f, df, city_field)
@@ -419,17 +489,90 @@ class ReportGenerator:
         return report_file
 
 
-def generate_report(df: pd.DataFrame, bot_locs: pd.DataFrame, hub_locs: pd.DataFrame, 
-                   independent_user_locs: pd.DataFrame, other_locs: pd.DataFrame, 
-                   stats: Dict[str, Any], output_dir: str, 
-                   cluster_df: Optional[pd.DataFrame] = None, # New parameter
+def generate_report(df: pd.DataFrame, bot_locs: pd.DataFrame, hub_locs: pd.DataFrame,
+                   independent_user_locs: pd.DataFrame, other_locs: pd.DataFrame,
+                   stats: Dict[str, Any], output_dir: str,
+                   cluster_df: Optional[pd.DataFrame] = None,
                    schema: Optional[LogSchema] = None,
                    available_features: Optional[List[str]] = None,
-                   classification_method: str = 'rules') -> str:
+                   classification_method: str = 'rules',
+                   generate_html: bool = True,
+                   generate_plots: bool = True,
+                   feature_importance: Optional[Dict[str, float]] = None) -> str:
     """
-    Convenience function for generating reports (backward compatibility).
-    
-    This creates a ReportGenerator and calls generate().
+    Generate comprehensive reports including text, HTML, and visualizations.
+
+    This function generates:
+    - Text report (bot_detection_report.txt)
+    - HTML report with embedded visualizations (report.html)
+    - Visualization plots (plots/ directory)
+    - Comprehensive statistics
+
+    Args:
+        df: Full analysis dataframe
+        bot_locs: Bot locations dataframe
+        hub_locs: Hub locations dataframe
+        independent_user_locs: Independent user locations dataframe
+        other_locs: Other/unclassified locations dataframe
+        stats: Statistics dictionary
+        output_dir: Output directory
+        cluster_df: Optional cluster information dataframe
+        schema: LogSchema defining field mappings
+        available_features: List of feature names actually used
+        classification_method: 'rules' or 'deep'
+        generate_html: Whether to generate HTML report (default: True)
+        generate_plots: Whether to generate visualization plots (default: True)
+        feature_importance: Optional dict of feature importance scores
+
+    Returns:
+        Path to generated text report file
     """
+    # Generate text report (always)
     generator = ReportGenerator(schema=schema)
-    return generator.generate(df, bot_locs, hub_locs, independent_user_locs, other_locs, stats, output_dir, cluster_df, available_features, classification_method)
+    text_report = generator.generate(
+        df, bot_locs, hub_locs, independent_user_locs, other_locs,
+        stats, output_dir, cluster_df, available_features, classification_method
+    )
+
+    # Compute comprehensive statistics
+    try:
+        from .statistics import StatisticsCalculator
+        stats_calculator = StatisticsCalculator(df, classification_method)
+        comprehensive_stats = stats_calculator.compute_all()
+
+        # Compute feature importance if not provided
+        if feature_importance is None:
+            feature_importance = stats_calculator.compute_feature_importance()
+
+        logger.info("Computed comprehensive statistics")
+    except Exception as e:
+        logger.warning(f"Failed to compute comprehensive statistics: {e}")
+        comprehensive_stats = {'classification': stats}
+
+    # Generate visualizations
+    plot_paths = []
+    if generate_plots:
+        try:
+            from .visualizations import VisualizationGenerator
+            viz_generator = VisualizationGenerator(output_dir)
+            plot_paths = viz_generator.generate_all_plots(
+                df, classification_method, feature_importance
+            )
+            logger.info(f"Generated {len(plot_paths)} visualization plots")
+        except Exception as e:
+            logger.warning(f"Failed to generate visualizations: {e}")
+
+    # Generate HTML report
+    if generate_html:
+        try:
+            from .html_report import HTMLReportGenerator
+            html_generator = HTMLReportGenerator(output_dir)
+            html_report = html_generator.generate(
+                df, comprehensive_stats, classification_method,
+                plot_paths, feature_importance
+            )
+            logger.info(f"Generated HTML report: {html_report}")
+        except Exception as e:
+            logger.warning(f"Failed to generate HTML report: {e}")
+
+    return text_report

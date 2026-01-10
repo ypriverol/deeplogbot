@@ -80,6 +80,12 @@ import warnings
 
 from ...utils import logger
 from ..isoforest.models import train_isolation_forest
+from ...features.providers.ebi import (
+    extract_behavioral_features,
+    extract_advanced_behavioral_features,
+    add_bot_interaction_features,
+    add_bot_signature_features,
+)
 from ...config import (
     get_hub_protection_rules,
     get_bot_detection_rules,
@@ -87,6 +93,7 @@ from ...config import (
     get_bot_thresholds,
     get_download_hub_thresholds,
     get_independent_user_thresholds,
+    get_stratified_prefiltering_thresholds,
 )
 
 # Try to import HDBSCAN, fall back to DBSCAN if not available
@@ -143,16 +150,18 @@ OVERRIDE_THRESHOLDS = {
     'OVERRIDE2_MAX_USERS': 100,   # Was 50
 }
 
-# Stratified processing thresholds
+# Stratified processing thresholds - now loaded from config.yaml
+# Use get_stratified_prefiltering_thresholds() instead of this constant
+# Keeping for backward compatibility but will be removed in future
 STRATIFICATION_THRESHOLDS = {
-    'OBVIOUS_BOT_USERS': 2000,           # >2000 users = obvious bot
-    'OBVIOUS_BOT_SINGLE_USER_DL': 1000,  # Single user with >1000 DL = bot
-    'OBVIOUS_BOT_DL_PER_USER': 100,      # >100 DL/user with >500 users = bot
-    'OBVIOUS_BOT_MODERATE_DL': 200,      # >200 DL/user with >100 users = bot
-    'LEGITIMATE_MAX_USERS': 5,           # <=5 users
-    'LEGITIMATE_MAX_DL_PER_USER': 3,     # <=3 DL/user
-    'LEGITIMATE_MAX_TOTAL_DL': 50,       # <50 total downloads
-    'LEGITIMATE_MAX_ANOMALY': 0.15,      # Low anomaly score
+    'OBVIOUS_BOT_USERS': 2000,
+    'OBVIOUS_BOT_SINGLE_USER_DL': 1000,  # DEPRECATED: Not used anymore
+    'OBVIOUS_BOT_DL_PER_USER': 100,
+    'OBVIOUS_BOT_MODERATE_DL': 200,
+    'LEGITIMATE_MAX_USERS': 5,
+    'LEGITIMATE_MAX_DL_PER_USER': 3,
+    'LEGITIMATE_MAX_TOTAL_DL': 50,
+    'LEGITIMATE_MAX_ANOMALY': 0.15,
 }
 
 # Scale-aware anomaly detection thresholds
@@ -321,6 +330,18 @@ class GroundTruthCategory(Enum):
     UNCERTAIN = "uncertain"        # Needs pattern discovery
 
 
+class BehaviorType(Enum):
+    """Level 1: Behavior type classification."""
+    ORGANIC = "organic"            # Human-like patterns
+    AUTOMATED = "automated"        # Programmatic patterns
+
+
+class AutomationCategory(Enum):
+    """Level 2: Automation category (for AUTOMATED behavior only)."""
+    BOT = "bot"                    # Suspicious/malicious automation
+    LEGITIMATE_AUTOMATION = "legitimate_automation"  # Benign automation
+
+
 def apply_ground_truth_rules(
     df: pd.DataFrame, 
     thresholds: Optional[GroundTruthThresholds] = None
@@ -383,206 +404,9 @@ def apply_ground_truth_rules(
 # =============================================================================
 # Pattern Discovery Features - Behavioral Signatures
 # =============================================================================
-
-def extract_behavioral_features(df: pd.DataFrame, input_parquet: str, conn) -> pd.DataFrame:
-    """
-    Extract features designed for pattern discovery.
+# NOTE: Behavioral feature extraction functions have been moved to features.behavioral
+# They are now imported at the top of this file from ...features.providers.ebi
     
-    These features capture behavioral signatures that distinguish patterns like:
-    - Pipeline/CI: Regular intervals, same files
-    - Research group: Working hours, diverse files
-    - Automated sync: Daily/weekly patterns
-    
-    Args:
-        df: DataFrame with basic features
-        input_parquet: Path to input parquet file
-        conn: DuckDB connection
-        
-    Returns:
-        DataFrame with behavioral features added
-    """
-    from ...features.schema import EBI_SCHEMA
-    schema = EBI_SCHEMA
-    
-    escaped_path = input_parquet.replace("'", "''")
-    
-    # Feature 1: Temporal regularity (how mechanical are the download times?)
-    logger.info("  Extracting temporal regularity features...")
-    
-    # Simplified query to reduce memory usage - sample instead of using all intervals
-    temporal_query = f"""
-    WITH sampled_downloads AS (
-        SELECT 
-            {schema.location_field} as geo_location,
-            {schema.timestamp_field} as download_time,
-            ROW_NUMBER() OVER (PARTITION BY {schema.location_field} ORDER BY RANDOM()) as rn
-        FROM read_parquet('{escaped_path}')
-        WHERE {schema.location_field} IS NOT NULL
-        AND {schema.timestamp_field} IS NOT NULL
-    ),
-    limited_downloads AS (
-        -- Sample up to 50 downloads per location to reduce memory/disk usage
-        SELECT geo_location, download_time 
-        FROM sampled_downloads 
-        WHERE rn <= 50
-    ),
-    download_intervals AS (
-        SELECT 
-            geo_location,
-            EPOCH(CAST(download_time AS TIMESTAMP) - 
-                  LAG(CAST(download_time AS TIMESTAMP)) 
-                  OVER (PARTITION BY geo_location ORDER BY download_time)) as interval_seconds
-        FROM limited_downloads
-    )
-    SELECT 
-        geo_location,
-        AVG(interval_seconds) as mean_interval,
-        STDDEV(interval_seconds) as std_interval,
-        -- Coefficient of variation: low = mechanical, high = random
-        CASE 
-            WHEN AVG(interval_seconds) > 0 
-            THEN STDDEV(interval_seconds) / AVG(interval_seconds) 
-            ELSE 1.0 
-        END as interval_cv,
-        -- Regularity score: inverse of CV (high = mechanical)
-        CASE 
-            WHEN STDDEV(interval_seconds) > 0 
-            THEN AVG(interval_seconds) / (STDDEV(interval_seconds) + 1) 
-            ELSE 0 
-        END as regularity_score
-    FROM download_intervals
-    WHERE interval_seconds IS NOT NULL AND interval_seconds > 0
-    GROUP BY geo_location
-    """
-    
-    try:
-        temporal_df = conn.execute(temporal_query).df()
-        df = df.merge(temporal_df, on='geo_location', how='left')
-        df['regularity_score'] = df['regularity_score'].fillna(0)
-        df['interval_cv'] = df['interval_cv'].fillna(1)
-    except Exception as e:
-        logger.warning(f"  Temporal features extraction failed: {e}")
-        df['regularity_score'] = 0
-        df['interval_cv'] = 1
-    
-    # Feature 2: Day-of-week patterns (weekday vs weekend)
-    logger.info("  Extracting day-of-week patterns...")
-    
-    dow_query = f"""
-    SELECT 
-        {schema.location_field} as geo_location,
-        -- Weekend ratio: 0 = all weekday, 1 = all weekend
-        AVG(CASE 
-            WHEN DAYOFWEEK(CAST({schema.timestamp_field} AS TIMESTAMP)) IN (0, 6) 
-            THEN 1.0 ELSE 0.0 
-        END) as weekend_ratio,
-        -- Weekday concentration: how concentrated on specific days?
-        COUNT(DISTINCT DAYOFWEEK(CAST({schema.timestamp_field} AS TIMESTAMP))) as unique_days_of_week
-    FROM read_parquet('{escaped_path}')
-    WHERE {schema.location_field} IS NOT NULL
-    AND {schema.timestamp_field} IS NOT NULL
-    GROUP BY {schema.location_field}
-    """
-    
-    try:
-        dow_df = conn.execute(dow_query).df()
-        df = df.merge(dow_df, on='geo_location', how='left')
-        df['weekend_ratio'] = df['weekend_ratio'].fillna(0.3)
-        df['unique_days_of_week'] = df['unique_days_of_week'].fillna(5)
-    except Exception as e:
-        logger.warning(f"  Day-of-week features extraction failed: {e}")
-        df['weekend_ratio'] = 0.3
-        df['unique_days_of_week'] = 5
-    
-    # Feature 3: File diversity (same files vs diverse files)
-    logger.info("  Extracting file diversity features...")
-    
-    file_query = f"""
-    SELECT 
-        {schema.location_field} as geo_location,
-        COUNT(DISTINCT filename) as unique_files,
-        COUNT(*) as total_downloads,
-        -- File concentration: 1/unique_files (high = few files, low = many files)
-        1.0 / NULLIF(COUNT(DISTINCT filename), 0) as file_concentration,
-        -- File diversity ratio: unique_files / total_downloads
-        CAST(COUNT(DISTINCT filename) AS DOUBLE) / COUNT(*) as file_diversity_ratio
-    FROM read_parquet('{escaped_path}')
-    WHERE {schema.location_field} IS NOT NULL
-    GROUP BY {schema.location_field}
-    """
-    
-    try:
-        file_df = conn.execute(file_query).df()
-        df = df.merge(
-            file_df[['geo_location', 'unique_files', 'file_concentration', 'file_diversity_ratio']], 
-            on='geo_location', 
-            how='left'
-        )
-        df['file_diversity_ratio'] = df['file_diversity_ratio'].fillna(1)
-        df['file_concentration'] = df['file_concentration'].fillna(1)
-    except Exception as e:
-        logger.warning(f"  File diversity features extraction failed: {e}")
-        df['file_diversity_ratio'] = 1
-        df['file_concentration'] = 1
-    
-    # Feature 4: Session patterns (do downloads come in bursts/sessions?)
-    logger.info("  Extracting session pattern features...")
-    
-    # Define a session as downloads within 30 minutes of each other
-    session_query = f"""
-    WITH numbered_downloads AS (
-        SELECT 
-            {schema.location_field} as geo_location,
-            CAST({schema.timestamp_field} AS TIMESTAMP) as ts,
-            ROW_NUMBER() OVER (PARTITION BY {schema.location_field} ORDER BY {schema.timestamp_field}) as rn
-        FROM read_parquet('{escaped_path}')
-        WHERE {schema.location_field} IS NOT NULL
-        AND {schema.timestamp_field} IS NOT NULL
-    ),
-    session_breaks AS (
-        SELECT 
-            a.geo_location,
-            CASE 
-                WHEN EPOCH(a.ts - b.ts) > 1800 THEN 1  -- 30 min gap = new session
-                ELSE 0 
-            END as is_new_session
-        FROM numbered_downloads a
-        LEFT JOIN numbered_downloads b ON a.geo_location = b.geo_location AND a.rn = b.rn + 1
-    )
-    SELECT 
-        geo_location,
-        SUM(is_new_session) + 1 as num_sessions,
-        COUNT(*) as total_in_sessions
-    FROM session_breaks
-    GROUP BY geo_location
-    """
-    
-    try:
-        session_df = conn.execute(session_query).df()
-        session_df['downloads_per_session'] = session_df['total_in_sessions'] / session_df['num_sessions'].replace(0, 1)
-        df = df.merge(
-            session_df[['geo_location', 'num_sessions', 'downloads_per_session']], 
-            on='geo_location', 
-            how='left'
-        )
-        df['num_sessions'] = df['num_sessions'].fillna(1)
-        df['downloads_per_session'] = df['downloads_per_session'].fillna(df['total_downloads'])
-    except Exception as e:
-        logger.warning(f"  Session pattern features extraction failed: {e}")
-        df['num_sessions'] = 1
-        df['downloads_per_session'] = df['total_downloads']
-    
-    # Derived behavioral features
-    df['is_mechanical'] = (df['regularity_score'] > df['regularity_score'].quantile(0.75)).astype(float)
-    df['is_weekday_biased'] = (df['weekend_ratio'] < 0.15).astype(float)
-    df['is_single_file'] = (df.get('file_diversity_ratio', 0) < 0.1).astype(float)
-    df['is_bursty'] = (df['downloads_per_session'] > df['downloads_per_session'].quantile(0.75)).astype(float)
-    
-    logger.info("  Behavioral features extracted successfully")
-    
-    return df
-
-
 # =============================================================================
 # Temporal Sequence Extraction
 # =============================================================================
@@ -615,7 +439,7 @@ def extract_temporal_sequences(
     """
     logger.info("Extracting temporal sequences from download data...")
     
-    from ...features.schema import EBI_SCHEMA
+    from ...features.providers.ebi import EBI_SCHEMA
     schema = EBI_SCHEMA
     escaped_path = input_parquet.replace("'", "''")
     
@@ -809,47 +633,79 @@ def stratified_prefilter(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series, pd.Ser
     2. Skipping deep learning for obvious legitimate users (<5 users, <3 DL/user)
     3. Focusing deep learning on genuinely ambiguous patterns
     
+    Thresholds are loaded from config.yaml (stratified_prefiltering section).
+    
     Args:
         df: DataFrame with location features
         
     Returns:
         Tuple of (obvious_bots, obvious_legitimate, uncertain) boolean Series
     """
+    # Load thresholds from config.yaml
+    config_thresholds = get_stratified_prefiltering_thresholds()
+    obvious_bots_config = config_thresholds.get('obvious_bots', {})
+    obvious_legitimate_config = config_thresholds.get('obvious_legitimate', {})
+    
+    # Fallback to hardcoded values if config is missing (backward compatibility)
     thresholds = STRATIFICATION_THRESHOLDS
     
     # Tier 1: Obvious bots (high confidence)
     obvious_bots = pd.Series(False, index=df.index)
     
     if _has_required_columns(df, 'unique_users', 'total_downloads', 'downloads_per_user'):
+        # Get thresholds from config (with fallback to hardcoded values)
+        min_users_obvious = obvious_bots_config.get('min_users', thresholds['OBVIOUS_BOT_USERS'])
+        many_users_rule = obvious_bots_config.get('many_users_low_dl', {
+            'min_users': 500,
+            'max_downloads_per_user': thresholds['OBVIOUS_BOT_DL_PER_USER']
+        })
+        large_scale_rule = obvious_bots_config.get('large_scale_low_dl', {
+            'min_users': 100,
+            'max_downloads_per_user': thresholds['OBVIOUS_BOT_MODERATE_DL']
+        })
+        
         obvious_bots = (
-            # Primary threshold: >2000 users per location
-            (df['unique_users'] > thresholds['OBVIOUS_BOT_USERS']) |
+            # Primary threshold: >2000 users per location (configurable)
+            (df['unique_users'] > min_users_obvious) |
             
-            # Single user hammering (1 user with >1000 downloads)
-            ((df['unique_users'] == 1) & (df['total_downloads'] > thresholds['OBVIOUS_BOT_SINGLE_USER_DL'])) |
+            # NOTE: Single users with high downloads are EXCLUDED from obvious bots
+            # A single user with >1000 downloads has >1000 DL/user, which indicates
+            # a hub (mirror server, institutional sync) rather than a bot.
+            # Bots typically have MANY users with LOW downloads per user.
+            # Single-user high-download cases will go through normal classification
+            # where hub protection will correctly identify them as hubs.
             
-            # Coordinated high-volume activity (>100 DL/user with >500 users)
-            ((df['downloads_per_user'] > thresholds['OBVIOUS_BOT_DL_PER_USER']) & 
-             (df['unique_users'] > 500)) |
+            # Coordinated bot activity (MANY users with LOW DL/user)
+            # Bots have many fake accounts, each doing minimal activity
+            # Pattern: >500 users AND <100 DL/user (configurable)
+            ((df['unique_users'] > many_users_rule.get('min_users', 500)) & 
+             (df['downloads_per_user'] < many_users_rule.get('max_downloads_per_user', 100))) |
             
-            # Extreme download concentration (>200 DL/user with >100 users)
-            ((df['downloads_per_user'] > thresholds['OBVIOUS_BOT_MODERATE_DL']) & 
-             (df['unique_users'] > 100))
+            # Large-scale bot farms (MANY users with VERY LOW DL/user)
+            # Pattern: >100 users AND <200 DL/user (configurable)
+            ((df['unique_users'] > large_scale_rule.get('min_users', 100)) & 
+             (df['downloads_per_user'] < large_scale_rule.get('max_downloads_per_user', 200)))
         )
     
     # Tier 2: Obvious legitimate (high confidence)
     obvious_legitimate = pd.Series(False, index=df.index)
     
     if _has_required_columns(df, 'unique_users', 'downloads_per_user', 'total_downloads'):
+        # Get thresholds from config (with fallback to hardcoded values)
+        max_users = obvious_legitimate_config.get('max_users', thresholds['LEGITIMATE_MAX_USERS'])
+        max_dl_per_user = obvious_legitimate_config.get('max_downloads_per_user', thresholds['LEGITIMATE_MAX_DL_PER_USER'])
+        max_total_dl = obvious_legitimate_config.get('max_total_downloads', thresholds['LEGITIMATE_MAX_TOTAL_DL'])
+        max_anomaly = obvious_legitimate_config.get('max_anomaly_score', thresholds['LEGITIMATE_MAX_ANOMALY'])
+        
         base_legitimate = (
-            (df['unique_users'] <= thresholds['LEGITIMATE_MAX_USERS']) & 
-            (df['downloads_per_user'] <= thresholds['LEGITIMATE_MAX_DL_PER_USER']) &
-            (df['total_downloads'] < thresholds['LEGITIMATE_MAX_TOTAL_DL'])
+            (df['unique_users'] <= max_users) & 
+            (df['downloads_per_user'] <= max_dl_per_user) &
+            (df['total_downloads'] < max_total_dl)
         )
         
         # Add anomaly score check if available
         if 'anomaly_score' in df.columns:
-            obvious_legitimate = base_legitimate & (df['anomaly_score'] < thresholds['LEGITIMATE_MAX_ANOMALY'])
+            obvious_legitimate = base_legitimate & (df['anomaly_score'] < max_anomaly)
         else:
             obvious_legitimate = base_legitimate
     
@@ -928,6 +784,76 @@ def compute_bot_likelihood_score(df: pd.DataFrame) -> np.ndarray:
     return score
 
 
+def compute_automation_score(df: pd.DataFrame) -> pd.Series:
+    """
+    Stage 1: Compute automation score using behavioral features.
+    
+    This score indicates how likely a location's behavior is automated vs human.
+    High score = automated behavior (burst patterns, coordination, non-human timing).
+    
+    Args:
+        df: DataFrame with behavioral features
+        
+    Returns:
+        Series with automation scores (0-1, higher = more automated)
+    """
+    score = pd.Series(0.0, index=df.index)
+    
+    def normalize_score(series: pd.Series) -> np.ndarray:
+        """Normalize a feature to 0-1 range."""
+        if len(series) == 0 or series.std() < 1e-10:
+            return np.zeros(len(series))
+        q01, q99 = series.quantile([0.01, 0.99])
+        if q99 - q01 < 1e-10:
+            return np.zeros(len(series))
+        normalized = (series - q01) / (q99 - q01)
+        return np.clip(normalized, 0, 1)
+    
+    # Burst patterns indicate automation
+    if 'burst_pattern_score' in df.columns:
+        score += normalize_score(df['burst_pattern_score']) * 0.30
+    
+    # Low circadian rhythm deviation = non-human (automated)
+    if 'circadian_rhythm_deviation' in df.columns:
+        # Invert: low deviation = high automation score
+        dev_normalized = normalize_score(df['circadian_rhythm_deviation'])
+        score += (1 - dev_normalized) * 0.25
+    
+    # Coordination indicates automation
+    if 'user_coordination_score' in df.columns:
+        score += normalize_score(df['user_coordination_score']) * 0.25
+    
+    # High entropy = irregular = automated
+    if 'hourly_entropy' in df.columns:
+        score += normalize_score(df['hourly_entropy']) * 0.20
+    
+    return score.clip(0, 1)
+
+
+def classify_human_users(df: pd.DataFrame) -> pd.Series:
+    """
+    Classify human users into Normal vs Independent User.
+    Uses existing logic based on user count and download patterns.
+    
+    Args:
+        df: DataFrame with location features
+        
+    Returns:
+        Series with 'normal' or 'independent_user' categories
+    """
+    categories = pd.Series('normal', index=df.index)
+    
+    # Independent users: very few users, low downloads
+    if 'unique_users' in df.columns and 'total_downloads' in df.columns:
+        independent_mask = (
+            (df['unique_users'] <= 5) &
+            (df['total_downloads'] <= 50)
+        )
+        categories[independent_mask] = 'independent_user'
+    
+    return categories
+
+
 def scale_aware_anomaly_detection(df: pd.DataFrame, feature_columns: List[str], 
                                    contamination: float = 0.15) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -950,6 +876,16 @@ def scale_aware_anomaly_detection(df: pd.DataFrame, feature_columns: List[str],
     thresholds = SCALE_THRESHOLDS
     predictions = np.zeros(len(df))
     anomaly_scores = np.zeros(len(df))
+    
+    # Filter feature columns to only those that exist in the dataframe
+    available_feature_columns = [f for f in feature_columns if f in df.columns]
+    if len(available_feature_columns) < len(feature_columns):
+        missing = [f for f in feature_columns if f not in df.columns]
+        logger.warning(f"    Scale-aware: {len(missing)} features not available, using {len(available_feature_columns)} features: {missing[:3]}{'...' if len(missing) > 3 else ''}")
+        feature_columns = available_feature_columns
+    
+    if len(feature_columns) == 0:
+        raise ValueError("No valid feature columns available for scale-aware anomaly detection")
     
     # Prepare feature matrix
     X = df[feature_columns].fillna(0).values
@@ -1320,14 +1256,13 @@ def _apply_hub_protection(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[definite_hub_mask, 'is_protected_hub'] = True
     
     # Override any bot classification - consolidated for maintainability
-    bot_columns = {
-        'is_bot': False,
-        'is_bot_neural': False,
-    }
-    
-    for col, value in bot_columns.items():
-        if col in df.columns:
-            df.loc[definite_hub_mask, col] = value
+    if 'is_bot_neural' in df.columns:
+        df.loc[definite_hub_mask, 'is_bot_neural'] = False
+
+    # Set hierarchical classification for definite hubs
+    df.loc[definite_hub_mask, 'behavior_type'] = 'automated'
+    df.loc[definite_hub_mask, 'automation_category'] = 'legitimate_automation'
+    df.loc[definite_hub_mask, 'subcategory'] = 'mirror'
     
     # Override user_category if it's set to bot
     if 'user_category' in df.columns:
@@ -1336,66 +1271,6 @@ def _apply_hub_protection(df: pd.DataFrame) -> pd.DataFrame:
     n_protected = definite_hub_mask.sum()
     if n_protected > 0:
         logger.info(f"    Hub protection applied: {n_protected:,} locations protected from bot classification")
-    
-    return df
-
-
-def add_bot_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add interaction features for better bot detection.
-    
-    Args:
-        df: DataFrame with location features
-        
-    Returns:
-        DataFrame with additional interaction features
-    """
-    # Core bot pattern: High DL/user with few users
-    if _has_required_columns(df, 'downloads_per_user', 'unique_users'):
-        df['dl_user_per_log_users'] = df['downloads_per_user'] / np.log(df['unique_users'] + LOG_USERS_OFFSET)
-        
-        df['user_scarcity_score'] = np.where(
-            df['downloads_per_user'] > BOT_THRESHOLDS['MODERATE_DL_PER_USER'],
-            np.exp(-df['unique_users'] / BOT_THRESHOLDS['FEW_USERS']),
-            0
-        )
-        
-        df['download_concentration'] = df['downloads_per_user'] * (1 / (df['unique_users'] + 1))
-    
-    # Anomaly-weighted features
-    if 'anomaly_score' in df.columns and 'downloads_per_user' in df.columns:
-        df['anomaly_dl_interaction'] = (df['anomaly_score'] + ANOMALY_SCORE_OFFSET).clip(0, 1) * df['downloads_per_user']
-    
-    # Temporal features
-    if 'hourly_entropy' in df.columns and 'downloads_per_user' in df.columns:
-        df['temporal_irregularity'] = (1 / (df['hourly_entropy'] + 0.1)) * np.log(df['downloads_per_user'] + 1)
-    
-    # Composite bot score
-    score_components = []
-    weights = []
-    
-    if 'dl_user_per_log_users' in df.columns:
-        max_val = df['dl_user_per_log_users'].quantile(0.95)
-        if max_val > EPSILON:
-            score_components.append(np.clip(df['dl_user_per_log_users'] / max_val, 0, 1))
-            weights.append(COMPOSITE_SCORE_WEIGHTS['DL_USER_PER_LOG_USERS'])
-    
-    if 'user_scarcity_score' in df.columns:
-        score_components.append(df['user_scarcity_score'])
-        weights.append(COMPOSITE_SCORE_WEIGHTS['USER_SCARCITY'])
-    
-    if 'download_concentration' in df.columns:
-        max_val = df['download_concentration'].quantile(0.95)
-        if max_val > EPSILON:
-            score_components.append(np.clip(df['download_concentration'] / max_val, 0, 1))
-            weights.append(COMPOSITE_SCORE_WEIGHTS['DOWNLOAD_CONCENTRATION'])
-    
-    if 'anomaly_score' in df.columns:
-        score_components.append((df['anomaly_score'] + ANOMALY_SCORE_OFFSET).clip(0, 1))
-        weights.append(COMPOSITE_SCORE_WEIGHTS['ANOMALY_SCORE'])
-    
-    if score_components:
-        weights = np.array(weights) / np.sum(weights)
-        df['bot_composite_score'] = sum(w * s for w, s in zip(weights, score_components))
     
     return df
 
@@ -1432,7 +1307,12 @@ def apply_bot_detection_override(df: pd.DataFrame) -> pd.DataFrame:
             logger.info(f"    Protecting {obvious_hubs.sum()} download hub patterns from bot override")
             df.loc[obvious_hubs, 'is_protected_hub'] = True
             df.loc[obvious_hubs, 'user_category'] = 'download_hub'
-            df.loc[obvious_hubs, 'is_bot_neural'] = False
+            if 'is_bot_neural' in df.columns:
+                df.loc[obvious_hubs, 'is_bot_neural'] = False
+            # Set hierarchical classification
+            df.loc[obvious_hubs, 'behavior_type'] = 'automated'
+            df.loc[obvious_hubs, 'automation_category'] = 'legitimate_automation'
+            df.loc[obvious_hubs, 'subcategory'] = 'mirror'
             hub_override_count = obvious_hubs.sum()
     
     # BOT Override 1: Many users with moderate DL/user (distributed bot farm)
@@ -1450,8 +1330,13 @@ def apply_bot_detection_override(df: pd.DataFrame) -> pd.DataFrame:
         if obvious_bots.any():
             logger.info(f"    Applying bot override for {obvious_bots.sum()} obvious bot patterns "
                        f"(>5000 users, 10-100 DL/user)")
-            df.loc[obvious_bots, 'is_bot_neural'] = True
+            if 'is_bot_neural' in df.columns:
+                df.loc[obvious_bots, 'is_bot_neural'] = True
             df.loc[obvious_bots, 'user_category'] = 'bot'
+            # Set hierarchical classification
+            df.loc[obvious_bots, 'behavior_type'] = 'automated'
+            df.loc[obvious_bots, 'automation_category'] = 'bot'
+            df.loc[obvious_bots, 'subcategory'] = 'scraper_bot'
             override_count += obvious_bots.sum()
     
     # BOT Override 2: Very many users with low DL/user (coordinated access)
@@ -1468,8 +1353,13 @@ def apply_bot_detection_override(df: pd.DataFrame) -> pd.DataFrame:
         if coordinated_bots.any():
             logger.info(f"    Applying bot override for {coordinated_bots.sum()} coordinated bot patterns "
                       f"(>10000 users, <20 DL/user)")
-            df.loc[coordinated_bots, 'is_bot_neural'] = True
+            if 'is_bot_neural' in df.columns:
+                df.loc[coordinated_bots, 'is_bot_neural'] = True
             df.loc[coordinated_bots, 'user_category'] = 'bot'
+            # Set hierarchical classification
+            df.loc[coordinated_bots, 'behavior_type'] = 'automated'
+            df.loc[coordinated_bots, 'automation_category'] = 'bot'
+            df.loc[coordinated_bots, 'subcategory'] = 'coordinated_bot'
             override_count += coordinated_bots.sum()
     
     logger.info(f"    Total bot overrides applied: {override_count}")
@@ -2401,93 +2291,8 @@ def ensemble_bot_discovery(df: pd.DataFrame, feature_columns: List[str],
 # =====================================================================
 # Enhancement 6: Bot Signature Features
 # =====================================================================
-
-def add_bot_signature_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add discriminative bot signature features.
-    
-    Features added:
-    - access_regularity: Inverse of hourly entropy (low entropy = regular = bot-like)
-    - ua_per_user: User-Agent diversity per user
-    - request_velocity: Downloads per active hour
-    - ip_concentration: 1 - IP entropy
-    - session_anomaly: Deviation from median session length
-    - request_pattern_anomaly: 1 / file request entropy
-    - weekend_weekday_imbalance: Deviation from expected 2/7 ratio
-    
-    Args:
-        df: DataFrame with location features
-        
-    Returns:
-        DataFrame with additional signature features
-    """
-    logger.info("    Adding bot signature features...")
-    
-    # 1. Access regularity (temporal pattern consistency)
-    if 'hourly_entropy' in df.columns:
-        # High entropy = irregular, low entropy = regular (bot-like)
-        df['access_regularity'] = 1.0 / (df['hourly_entropy'] + 0.1)
-    else:
-        df['access_regularity'] = 0.0
-    
-    # 2. User-Agent diversity (if available in raw data, use proxy)
-    # Proxy: locations with many users but low diversity are suspicious
-    if 'unique_users' in df.columns and 'total_downloads' in df.columns:
-        df['ua_per_user'] = 1.0 / (df['unique_users'] / (df['total_downloads'] + 1) + 0.01)
-    else:
-        df['ua_per_user'] = 1.0
-    
-    # 3. Request velocity (downloads per active time)
-    if 'total_downloads' in df.columns:
-        # Estimate active hours from entropy and working hours ratio
-        if 'working_hours_ratio' in df.columns:
-            active_hours = df['working_hours_ratio'] * 24 * 7  # Hours per week
-            df['request_velocity'] = df['total_downloads'] / (active_hours + 1)
-        else:
-            df['request_velocity'] = df['total_downloads'] / 168  # Assume full week
-    else:
-        df['request_velocity'] = 0.0
-    
-    # 4. IP concentration (1 - entropy)
-    # Proxy: high users with low diversity suggests IP cycling
-    if 'unique_users' in df.columns and 'downloads_per_user' in df.columns:
-        # Estimate IP entropy from user distribution
-        user_entropy = np.log1p(df['unique_users']) / np.log1p(df['unique_users'].max() + 1)
-        df['ip_concentration'] = 1.0 - user_entropy
-    else:
-        df['ip_concentration'] = 0.0
-    
-    # 5. Session anomaly (deviation from median)
-    if 'downloads_per_user' in df.columns:
-        median_dl_per_user = df['downloads_per_user'].median()
-        df['session_anomaly'] = np.abs(df['downloads_per_user'] - median_dl_per_user) / (median_dl_per_user + 1)
-    else:
-        df['session_anomaly'] = 0.0
-    
-    # 6. Request pattern anomaly (file diversity)
-    # Bots often request same files repeatedly
-    # Proxy: low DL/user with high users suggests coordinated same-file requests
-    if 'downloads_per_user' in df.columns and 'unique_users' in df.columns:
-        # Low DL/user = likely requesting same files
-        file_entropy_proxy = df['downloads_per_user'] / (np.log1p(df['unique_users']) + 1)
-        df['request_pattern_anomaly'] = 1.0 / (file_entropy_proxy + 0.1)
-    else:
-        df['request_pattern_anomaly'] = 0.0
-    
-    # 7. Weekend/weekday imbalance
-    # Bots work 24/7, humans have patterns
-    if 'working_hours_ratio' in df.columns:
-        # Expected ratio: ~5/7 weekdays for humans
-        # Bots: closer to uniform or inverted
-        expected_weekday_ratio = 5.0 / 7.0
-        df['weekend_weekday_imbalance'] = np.abs(df['working_hours_ratio'] - expected_weekday_ratio)
-    else:
-        df['weekend_weekday_imbalance'] = 0.0
-    
-    n_new_features = 7
-    logger.info(f"      Added {n_new_features} bot signature features")
-    
-    return df
+# NOTE: Bot signature features have been moved to features.behavioral
+# They are now imported at the top of this file from ...features.providers.ebi
 
 
 # =====================================================================
@@ -2564,6 +2369,460 @@ def identify_uncertain_cases_for_review(
     return uncertain_df
 
 
+def compute_deep_feature_importance(
+    df: pd.DataFrame,
+    classifier: nn.Module,
+    X_tensor: torch.Tensor,
+    X_fixed_tensor: torch.Tensor,
+    feature_columns: List[str],
+    fixed_feature_cols: List[str],
+    device: torch.device,
+    output_dir: str,
+    sequence_length: int = 12,
+    num_features_per_window: int = 6,
+    n_samples: int = 1000,
+    n_steps: int = 50
+) -> Dict[str, str]:
+    """
+    Compute comprehensive feature importance analysis for deep learning model.
+    
+    This function generates multiple types of feature importance analyses to understand
+    which features the model relies on most for classification decisions. This helps
+    determine if the model is learning intrinsic patterns or just replicating rules.
+    
+    Analysis includes:
+    1. Gradient-based feature importance (integrated gradients)
+    2. Permutation importance
+    3. Feature distributions by class
+    4. Feature correlation with predictions
+    5. Statistical comparisons across classes
+    
+    Args:
+        df: DataFrame with features and classifications
+        classifier: Trained TransformerClassifier model
+        X_tensor: Time-series feature tensor
+        X_fixed_tensor: Fixed feature tensor
+        feature_columns: List of all feature column names
+        fixed_feature_cols: List of fixed (non-time-series) feature column names
+        device: PyTorch device
+        output_dir: Directory to save analysis results
+        sequence_length: Length of time-series sequences
+        num_features_per_window: Number of features per time window
+        n_samples: Number of samples to use for permutation importance (default: 1000)
+        n_steps: Number of steps for integrated gradients (default: 50)
+    
+    Returns:
+        Dictionary with paths to generated analysis files
+    """
+    import os
+    from scipy import stats
+    
+    os.makedirs(output_dir, exist_ok=True)
+    logger.info("  Computing feature importance analysis...")
+    
+    classifier.eval()
+    results_paths = {}
+    
+    # =====================================================================
+    # 1. Gradient-Based Feature Importance (Integrated Gradients)
+    # =====================================================================
+    logger.info("  Method 1: Gradient-based feature importance (integrated gradients)...")
+    try:
+        # Sample locations for analysis (stratified by class if possible)
+        sample_indices = []
+        for category in ['bot', 'download_hub', 'normal', 'independent_user', 'other']:
+            if 'user_category' in df.columns:
+                cat_indices = df[df['user_category'] == category].index.tolist()
+                if len(cat_indices) > 0:
+                    n_sample = min(200, len(cat_indices))
+                    sample_indices.extend(np.random.choice(cat_indices, n_sample, replace=False).tolist())
+        
+        if len(sample_indices) == 0:
+            # Fallback to random sampling
+            sample_indices = np.random.choice(len(df), min(n_samples, len(df)), replace=False).tolist()
+        
+        sample_indices = sample_indices[:n_samples]
+        
+        # Get baseline (zeros or mean)
+        baseline_ts = torch.zeros(1, sequence_length, num_features_per_window, device=device)
+        baseline_fixed = torch.zeros(1, len(fixed_feature_cols), device=device)
+        
+        # Compute integrated gradients for fixed features
+        integrated_grads_fixed = []
+        for idx in sample_indices:
+            x_fixed = X_fixed_tensor[idx:idx+1].clone().detach().requires_grad_(True)
+            
+            # Integrated gradients: average gradients along path from baseline to input
+            alphas = torch.linspace(0, 1, n_steps, device=device)
+            grad_sum = torch.zeros_like(x_fixed)
+            
+            for alpha in alphas:
+                x_interp = baseline_fixed + alpha * (x_fixed - baseline_fixed)
+                x_interp.requires_grad_(True)
+                
+                # Forward pass (we only need fixed features for this analysis)
+                # Use a dummy time-series tensor for the forward pass
+                x_ts_dummy = X_tensor[idx:idx+1].clone()
+                logits, _, _ = classifier(x_ts_dummy, x_interp)
+                
+                # Backward pass
+                output = logits.max()  # Use max logit (the predicted class)
+                output.backward(retain_graph=True)
+                
+                if x_interp.grad is not None:
+                    grad_sum += x_interp.grad
+                
+                classifier.zero_grad()
+            
+            # Integrated gradient = (input - baseline) * average_gradient
+            avg_grad = grad_sum / n_steps
+            ig = (x_fixed.detach() - baseline_fixed) * avg_grad
+            integrated_grads_fixed.append(ig.cpu().numpy().flatten())
+        
+        integrated_grads_fixed = np.array(integrated_grads_fixed)
+        mean_ig_fixed = np.abs(integrated_grads_fixed).mean(axis=0)
+        
+        # Create importance dataframe
+        ig_df = pd.DataFrame({
+            'feature': fixed_feature_cols,
+            'integrated_gradient_importance': mean_ig_fixed,
+            'abs_integrated_gradient': np.abs(mean_ig_fixed)
+        }).sort_values('abs_integrated_gradient', ascending=False)
+        
+        ig_path = os.path.join(output_dir, 'feature_importance_integrated_gradients.csv')
+        ig_df.to_csv(ig_path, index=False)
+        results_paths['integrated_gradients'] = ig_path
+        
+        logger.info(f"    Saved integrated gradients importance to {ig_path}")
+        logger.info("    Top 10 features (integrated gradients):")
+        for _, row in ig_df.head(10).iterrows():
+            logger.info(f"      {row['feature']}: {row['abs_integrated_gradient']:.6f}")
+            
+    except Exception as e:
+        logger.warning(f"    Integrated gradients computation failed: {e}")
+    
+    # =====================================================================
+    # 2. Permutation Importance
+    # =====================================================================
+    logger.info("  Method 2: Permutation importance...")
+    try:
+        # Sample for permutation importance
+        perm_sample_indices = np.random.choice(len(df), min(n_samples, len(df)), replace=False)
+        X_fixed_sample = X_fixed_tensor[perm_sample_indices].clone()
+        
+        # Get baseline predictions
+        X_ts_sample = X_tensor[perm_sample_indices].clone()
+        with torch.no_grad():
+            baseline_logits, _, _ = classifier(X_ts_sample, X_fixed_sample)
+            baseline_probs = F.softmax(baseline_logits, dim=1)
+            baseline_pred = baseline_probs.argmax(dim=1)
+            baseline_confidence = baseline_probs.max(dim=1)[0].mean().item()
+        
+        permutation_importances = []
+        
+        for feat_idx, feat_name in enumerate(fixed_feature_cols):
+            # Permute this feature
+            X_fixed_perm = X_fixed_sample.clone()
+            perm_indices = torch.randperm(len(X_fixed_perm))
+            X_fixed_perm[:, feat_idx] = X_fixed_perm[perm_indices, feat_idx]
+            
+            # Get predictions with permuted feature
+            with torch.no_grad():
+                perm_logits, _, _ = classifier(X_ts_sample, X_fixed_perm)
+                perm_probs = F.softmax(perm_logits, dim=1)
+                perm_pred = perm_probs.argmax(dim=1)
+                perm_confidence = perm_probs.max(dim=1)[0].mean().item()
+            
+            # Importance = drop in confidence when feature is permuted
+            importance = baseline_confidence - perm_confidence
+            permutation_importances.append(importance)
+            
+            if (feat_idx + 1) % 5 == 0:
+                logger.info(f"    Processed {feat_idx + 1}/{len(fixed_feature_cols)} features...")
+        
+        perm_df = pd.DataFrame({
+            'feature': fixed_feature_cols,
+            'permutation_importance': permutation_importances,
+            'abs_permutation_importance': np.abs(permutation_importances)
+        }).sort_values('abs_permutation_importance', ascending=False)
+        
+        perm_path = os.path.join(output_dir, 'feature_importance_permutation.csv')
+        perm_df.to_csv(perm_path, index=False)
+        results_paths['permutation'] = perm_path
+        
+        logger.info(f"    Saved permutation importance to {perm_path}")
+        logger.info("    Top 10 features (permutation importance):")
+        for _, row in perm_df.head(10).iterrows():
+            logger.info(f"      {row['feature']}: {row['abs_permutation_importance']:.6f}")
+            
+    except Exception as e:
+        logger.warning(f"    Permutation importance computation failed: {e}", exc_info=True)
+    
+    # =====================================================================
+    # 3. Feature Distributions by Class
+    # =====================================================================
+    logger.info("  Method 3: Feature distributions by class...")
+    try:
+        feature_stats = []
+        
+        for feat in fixed_feature_cols:
+            if feat not in df.columns:
+                continue
+                
+            for category in ['bot', 'download_hub', 'normal', 'independent_user', 'other']:
+                if 'user_category' not in df.columns:
+                    break
+                    
+                cat_mask = df['user_category'] == category
+                if not cat_mask.any():
+                    continue
+                
+                feat_values = df.loc[cat_mask, feat].dropna()
+                if len(feat_values) == 0:
+                    continue
+                
+                feature_stats.append({
+                    'feature': feat,
+                    'category': category,
+                    'count': len(feat_values),
+                    'mean': feat_values.mean(),
+                    'median': feat_values.median(),
+                    'std': feat_values.std(),
+                    'min': feat_values.min(),
+                    'max': feat_values.max(),
+                    'q25': feat_values.quantile(0.25),
+                    'q75': feat_values.quantile(0.75),
+                    'iqr': feat_values.quantile(0.75) - feat_values.quantile(0.25)
+                })
+        
+        stats_df = pd.DataFrame(feature_stats)
+        stats_path = os.path.join(output_dir, 'feature_statistics_by_class.csv')
+        stats_df.to_csv(stats_path, index=False)
+        results_paths['statistics'] = stats_path
+        
+        logger.info(f"    Saved feature statistics by class to {stats_path}")
+        
+    except Exception as e:
+        logger.warning(f"    Feature statistics computation failed: {e}")
+    
+    # =====================================================================
+    # 4. Statistical Comparisons: Bot vs Normal, Hub vs Normal, etc.
+    # =====================================================================
+    logger.info("  Method 4: Statistical comparisons across classes...")
+    try:
+        comparisons = []
+        
+        if 'user_category' in df.columns:
+            categories = df['user_category'].unique()
+            
+            for feat in fixed_feature_cols:
+                if feat not in df.columns:
+                    continue
+                
+                feat_data = df[feat].dropna()
+                if len(feat_data) < 10:
+                    continue
+                
+                for cat1 in categories:
+                    for cat2 in categories:
+                        if cat1 >= cat2:  # Avoid duplicates and self-comparisons
+                            continue
+                        
+                        cat1_data = df[df['user_category'] == cat1][feat].dropna()
+                        cat2_data = df[df['user_category'] == cat2][feat].dropna()
+                        
+                        if len(cat1_data) < 5 or len(cat2_data) < 5:
+                            continue
+                        
+                        # Mann-Whitney U test (non-parametric)
+                        try:
+                            statistic, p_value = stats.mannwhitneyu(cat1_data, cat2_data, alternative='two-sided')
+                        except Exception:
+                            p_value = 1.0
+                        
+                        # Effect size (Cohen's d)
+                        mean_diff = cat1_data.mean() - cat2_data.mean()
+                        pooled_std = np.sqrt((cat1_data.std()**2 + cat2_data.std()**2) / 2)
+                        cohens_d = mean_diff / pooled_std if pooled_std > 0 else 0
+                        
+                        comparisons.append({
+                            'feature': feat,
+                            'category1': cat1,
+                            'category2': cat2,
+                            'cat1_mean': cat1_data.mean(),
+                            'cat2_mean': cat2_data.mean(),
+                            'mean_difference': mean_diff,
+                            'cohens_d': cohens_d,
+                            'p_value': p_value,
+                            'significant': p_value < 0.05,
+                            'cat1_n': len(cat1_data),
+                            'cat2_n': len(cat2_data)
+                        })
+        
+        comp_df = pd.DataFrame(comparisons)
+        if len(comp_df) > 0:
+            comp_df = comp_df.sort_values(['abs_cohens_d'], ascending=False, key=lambda x: np.abs(x))
+            comp_path = os.path.join(output_dir, 'feature_statistical_comparisons.csv')
+            comp_df.to_csv(comp_path, index=False)
+            results_paths['comparisons'] = comp_path
+            
+            logger.info(f"    Saved statistical comparisons to {comp_path}")
+            
+            # Show top discriminating features
+            top_features = comp_df.nlargest(20, 'abs_cohens_d')
+            logger.info("    Top 10 most discriminating features (by effect size):")
+            for _, row in top_features.head(10).iterrows():
+                logger.info(f"      {row['feature']}: {row['category1']} vs {row['category2']}, "
+                          f"Cohen's d={row['cohens_d']:.3f}, p={row['p_value']:.4f}")
+        
+    except Exception as e:
+        logger.warning(f"    Statistical comparisons failed: {e}")
+    
+    # =====================================================================
+    # 5. Feature Correlation with Predictions
+    # =====================================================================
+    logger.info("  Method 5: Feature correlation with predictions...")
+    try:
+        if 'user_category' in df.columns:
+            # Convert categories to numeric for correlation
+            cat_map = {'bot': 0, 'download_hub': 1, 'independent_user': 2, 'normal': 3, 'other': 4}
+            df_numeric = df.copy()
+            df_numeric['category_numeric'] = df_numeric['user_category'].map(cat_map)
+            df_numeric['is_bot_numeric'] = (df_numeric['user_category'] == 'bot').astype(int)
+            df_numeric['is_hub_numeric'] = (df_numeric['user_category'] == 'download_hub').astype(int)
+            
+            correlations = []
+            for feat in fixed_feature_cols:
+                if feat not in df_numeric.columns:
+                    continue
+                
+                feat_data = df_numeric[feat].dropna()
+                if len(feat_data) < 10:
+                    continue
+                
+                # Correlation with bot classification
+                bot_data = df_numeric.loc[feat_data.index, 'is_bot_numeric']
+                corr_bot, p_bot = stats.pearsonr(feat_data, bot_data) if len(feat_data) > 1 else (0, 1)
+                
+                # Correlation with hub classification
+                hub_data = df_numeric.loc[feat_data.index, 'is_hub_numeric']
+                corr_hub, p_hub = stats.pearsonr(feat_data, hub_data) if len(feat_data) > 1 else (0, 1)
+                
+                # Correlation with category
+                cat_data = df_numeric.loc[feat_data.index, 'category_numeric']
+                corr_cat, p_cat = stats.pearsonr(feat_data, cat_data) if len(feat_data) > 1 else (0, 1)
+                
+                correlations.append({
+                    'feature': feat,
+                    'correlation_with_bot': corr_bot if not np.isnan(corr_bot) else 0,
+                    'p_value_bot': p_bot if not np.isnan(p_bot) else 1,
+                    'correlation_with_hub': corr_hub if not np.isnan(corr_hub) else 0,
+                    'p_value_hub': p_hub if not np.isnan(p_hub) else 1,
+                    'correlation_with_category': corr_cat if not np.isnan(corr_cat) else 0,
+                    'p_value_category': p_cat if not np.isnan(p_cat) else 1,
+                    'abs_correlation_bot': np.abs(corr_bot) if not np.isnan(corr_bot) else 0,
+                    'abs_correlation_hub': np.abs(corr_hub) if not np.isnan(corr_hub) else 0
+                })
+            
+            corr_df = pd.DataFrame(correlations)
+            corr_df = corr_df.sort_values('abs_correlation_bot', ascending=False)
+            corr_path = os.path.join(output_dir, 'feature_correlations.csv')
+            corr_df.to_csv(corr_path, index=False)
+            results_paths['correlations'] = corr_path
+            
+            logger.info(f"    Saved feature correlations to {corr_path}")
+            logger.info("    Top 10 features correlated with bot classification:")
+            for _, row in corr_df.head(10).iterrows():
+                logger.info(f"      {row['feature']}: r={row['correlation_with_bot']:.4f}, p={row['p_value_bot']:.4f}")
+        
+    except Exception as e:
+        logger.warning(f"    Correlation analysis failed: {e}")
+    
+    # =====================================================================
+    # 6. Combined Importance Score
+    # =====================================================================
+    logger.info("  Method 6: Computing combined importance score...")
+    try:
+        # Combine different importance metrics
+        combined_importance = pd.DataFrame({'feature': fixed_feature_cols})
+        
+        # Merge integrated gradients
+        if 'integrated_gradients' in results_paths and os.path.exists(results_paths['integrated_gradients']):
+            ig_df = pd.read_csv(results_paths['integrated_gradients'])
+            combined_importance = combined_importance.merge(
+                ig_df[['feature', 'abs_integrated_gradient']],
+                on='feature', how='left'
+            )
+            combined_importance['abs_integrated_gradient'] = combined_importance['abs_integrated_gradient'].fillna(0)
+            # Normalize to 0-1
+            if combined_importance['abs_integrated_gradient'].max() > 0:
+                combined_importance['ig_normalized'] = (
+                    combined_importance['abs_integrated_gradient'] / 
+                    combined_importance['abs_integrated_gradient'].max()
+                )
+            else:
+                combined_importance['ig_normalized'] = 0
+        else:
+            combined_importance['ig_normalized'] = 0
+        
+        # Merge permutation importance
+        if 'permutation' in results_paths and os.path.exists(results_paths['permutation']):
+            perm_df = pd.read_csv(results_paths['permutation'])
+            combined_importance = combined_importance.merge(
+                perm_df[['feature', 'abs_permutation_importance']],
+                on='feature', how='left'
+            )
+            combined_importance['abs_permutation_importance'] = combined_importance['abs_permutation_importance'].fillna(0)
+            # Normalize to 0-1
+            if combined_importance['abs_permutation_importance'].max() > 0:
+                combined_importance['perm_normalized'] = (
+                    combined_importance['abs_permutation_importance'] / 
+                    combined_importance['abs_permutation_importance'].max()
+                )
+            else:
+                combined_importance['perm_normalized'] = 0
+        else:
+            combined_importance['perm_normalized'] = 0
+        
+        # Merge correlation with bot
+        if 'correlations' in results_paths and os.path.exists(results_paths['correlations']):
+            corr_df = pd.read_csv(results_paths['correlations'])
+            combined_importance = combined_importance.merge(
+                corr_df[['feature', 'abs_correlation_bot']],
+                on='feature', how='left'
+            )
+            combined_importance['abs_correlation_bot'] = combined_importance['abs_correlation_bot'].fillna(0)
+        else:
+            combined_importance['abs_correlation_bot'] = 0
+        
+        # Combined score (weighted average)
+        combined_importance['combined_importance'] = (
+            0.4 * combined_importance['ig_normalized'] +
+            0.4 * combined_importance['perm_normalized'] +
+            0.2 * combined_importance['abs_correlation_bot']
+        )
+        
+        combined_importance = combined_importance.sort_values('combined_importance', ascending=False)
+        combined_path = os.path.join(output_dir, 'feature_importance_combined.csv')
+        combined_importance.to_csv(combined_path, index=False)
+        results_paths['combined'] = combined_path
+        
+        logger.info(f"    Saved combined importance to {combined_path}")
+        logger.info("\n    Top 20 Most Important Features (Combined Score):")
+        for idx, row in combined_importance.head(20).iterrows():
+            logger.info(f"      {row['feature']:30s}: "
+                      f"Combined={row['combined_importance']:.4f} "
+                      f"(IG={row['ig_normalized']:.3f}, "
+                      f"Perm={row['perm_normalized']:.3f}, "
+                      f"Corr={row['abs_correlation_bot']:.3f})")
+        
+    except Exception as e:
+        logger.warning(f"    Combined importance computation failed: {e}")
+    
+    logger.info("  Feature importance analysis complete!")
+    return results_paths
+
+
 def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                               use_transformer: bool = True, random_state: int = 42,
                               contamination: float = 0.15, sequence_length: int = 12,
@@ -2578,7 +2837,11 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                               enable_stratified_processing: bool = True,
                               enable_scale_aware_anomaly: bool = True,
                               enable_bot_likelihood: bool = True,
-                              enable_confidence_classification: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                              enable_confidence_classification: bool = True,
+                              compute_feature_importance: bool = False,
+                              feature_importance_output_dir: Optional[str] = None,
+                              input_parquet: Optional[str] = None,
+                              conn = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Classify locations using deep architecture: Isolation Forest + Transformers.
     
@@ -2620,18 +2883,30 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         enable_scale_aware_anomaly: Whether to use scale-aware anomaly detection (default: True)
         enable_bot_likelihood: Whether to compute bot likelihood scores (default: True)
         enable_confidence_classification: Whether to use confidence-based classification (default: True)
+        compute_feature_importance: Whether to compute detailed feature importance analysis (default: False)
+        feature_importance_output_dir: Directory to save feature importance analysis results (required if compute_feature_importance=True)
     
     Returns:
         Tuple of (DataFrame with classification columns added, empty cluster_df for compatibility)
     """
     logger.info("Training deep architecture classifier (Isolation Forest + Transformers)...")
     
+    # Note: Advanced behavioral features are extracted in main.py before calling this function
+    # to ensure they're available for the entire pipeline
+    
     # Initialize classification columns
     df['user_category'] = 'normal'
-    df['is_bot'] = False
-    df['is_download_hub'] = False
     df['classification_confidence'] = 0.0
     df['needs_review'] = False
+    df['stage'] = 0  # 0 = not processed, 1 = human, 2 = automated
+    df['stage1_category'] = None  # 'human' or 'automated'
+    df['stage2_category'] = None  # 'malicious', 'legitimate', or 'ambiguous'
+    df['automation_score'] = 0.0
+
+    # Initialize hierarchical classification columns
+    df['behavior_type'] = 'organic'  # Default to organic, will be updated
+    df['automation_category'] = None  # Only set for automated behavior
+    df['subcategory'] = 'individual_user'  # Default subcategory
     
     # =========================================================================
     # Phase 6 Enhancement: Stratified Pre-filtering
@@ -2646,17 +2921,23 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         
         # Classify obvious cases immediately
         df.loc[obvious_bots_mask, 'user_category'] = 'bot'
-        df.loc[obvious_bots_mask, 'is_bot'] = True
         df.loc[obvious_bots_mask, 'classification_confidence'] = 0.95
-        
+        # Hierarchical: obvious bots are automated -> bot
+        df.loc[obvious_bots_mask, 'behavior_type'] = 'automated'
+        df.loc[obvious_bots_mask, 'automation_category'] = 'bot'
+        df.loc[obvious_bots_mask, 'subcategory'] = 'scraper_bot'
+
         df.loc[obvious_legitimate_mask, 'user_category'] = 'independent_user'
         df.loc[obvious_legitimate_mask, 'classification_confidence'] = 0.90
-        
+        # Hierarchical: obvious legitimate are organic -> individual_user
+        df.loc[obvious_legitimate_mask, 'behavior_type'] = 'organic'
+        df.loc[obvious_legitimate_mask, 'automation_category'] = None
+        df.loc[obvious_legitimate_mask, 'subcategory'] = 'individual_user'
+
         # Only process uncertain cases with deep learning
         if not uncertain_mask.any():
             logger.info("  All locations classified by pre-filtering. Skipping deep learning.")
             cluster_df = pd.DataFrame()
-            df['is_download_hub'] = df['user_category'] == 'download_hub'
             df['is_independent_user'] = df['user_category'] == 'independent_user'
             df['is_normal_user'] = df['user_category'] == 'normal'
             return df, cluster_df
@@ -2683,8 +2964,15 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         df_uncertain['anomaly_score'] = scores
     else:
         logger.info("  Step 1/3: Running standard Isolation Forest for anomaly detection...")
+        # Filter feature columns to only those that exist
+        available_features_std = [f for f in feature_columns if f in df_uncertain.columns]
+        if len(available_features_std) < len(feature_columns):
+            missing_std = [f for f in feature_columns if f not in df_uncertain.columns]
+            logger.warning(f"    Standard IF: {len(missing_std)} features not available, using {len(available_features_std)}: {missing_std[:3]}{'...' if len(missing_std) > 3 else ''}")
+        if len(available_features_std) == 0:
+            raise ValueError("No valid feature columns available for standard Isolation Forest")
         predictions, scores, _, _ = train_isolation_forest(
-            df_uncertain, feature_columns, contamination=contamination
+            df_uncertain, available_features_std, contamination=contamination
         )
         df_uncertain['is_anomaly'] = predictions == -1
         df_uncertain['anomaly_score'] = -scores
@@ -2694,6 +2982,72 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     # Copy anomaly results back to main dataframe
     df.loc[uncertain_indices, 'is_anomaly'] = df_uncertain['is_anomaly'].values
     df.loc[uncertain_indices, 'anomaly_score'] = df_uncertain['anomaly_score'].values
+    
+    # =========================================================================
+    # TWO-STAGE CLASSIFICATION: Stage 1 - Automated vs Human
+    # =========================================================================
+    logger.info("\n  ============================================================")
+    logger.info("  TWO-STAGE CLASSIFICATION")
+    logger.info("  ============================================================")
+    logger.info("  Stage 1: Detecting automated vs human behavior...")
+    
+    # Compute automation score for uncertain locations
+    automation_score = compute_automation_score(df_uncertain)
+    df.loc[uncertain_indices, 'automation_score'] = automation_score.values
+    
+    # Threshold for automation (tuneable - currently using 0.5)
+    automation_threshold = 0.5
+    is_automated = automation_score > automation_threshold
+    
+    logger.info(f"    Automation threshold: {automation_threshold}")
+    logger.info(f"    Automated locations: {is_automated.sum():,} ({is_automated.mean()*100:.1f}%)")
+    logger.info(f"    Human locations: {(~is_automated).sum():,} ({(~is_automated).mean()*100:.1f}%)")
+    
+    # Classify humans immediately (no need for Stage 2)
+    human_mask = ~is_automated
+    if human_mask.any():
+        human_indices = uncertain_indices[human_mask.values if isinstance(human_mask, pd.Series) else human_mask]
+        human_categories = classify_human_users(df_uncertain[human_mask])
+        df.loc[human_indices, 'user_category'] = human_categories.values
+        df.loc[human_indices, 'stage'] = 1
+        df.loc[human_indices, 'stage1_category'] = 'human'
+        df.loc[human_indices, 'classification_confidence'] = 0.85
+        # Hierarchical: human locations are organic
+        df.loc[human_indices, 'behavior_type'] = 'organic'
+        df.loc[human_indices, 'automation_category'] = None
+        # Map user_category to subcategory
+        for idx in human_indices:
+            cat = df.loc[idx, 'user_category']
+            if cat == 'independent_user':
+                df.loc[idx, 'subcategory'] = 'individual_user'
+            elif cat == 'normal':
+                df.loc[idx, 'subcategory'] = 'research_group'
+            else:
+                df.loc[idx, 'subcategory'] = cat
+        logger.info(f"    Classified {human_mask.sum():,} human locations: {human_categories.value_counts().to_dict()}")
+    
+    # Mark automated locations for Stage 2 processing
+    automated_mask = is_automated
+    if automated_mask.any():
+        automated_indices = uncertain_indices[automated_mask.values if isinstance(automated_mask, pd.Series) else automated_mask]
+        df.loc[automated_indices, 'stage'] = 2
+        df.loc[automated_indices, 'stage1_category'] = 'automated'
+        logger.info(f"  Stage 2: Will classify {automated_mask.sum():,} automated locations (malicious vs legitimate) after Transformer processing...")
+    else:
+        logger.info("  No automated locations found - all classified as human")
+        # All locations are human, skip Transformer and Stage 2
+        df.loc[uncertain_indices, 'stage'] = 1
+        df.loc[uncertain_indices, 'stage1_category'] = 'human'
+        # Skip Transformer processing - return early
+        cluster_df = pd.DataFrame()
+        df['is_independent_user'] = df['user_category'] == 'independent_user'
+        df['is_normal_user'] = df['user_category'] == 'normal'
+        return df, cluster_df
+    
+    # Copy automation_score and stage info back to df_uncertain for Transformer processing
+    df_uncertain.loc[:, 'automation_score'] = df.loc[uncertain_indices, 'automation_score'].values
+    df_uncertain.loc[:, 'stage'] = df.loc[uncertain_indices, 'stage'].values
+    df_uncertain.loc[:, 'stage1_category'] = df.loc[uncertain_indices, 'stage1_category'].values
     
     # =========================================================================
     # Phase 6 Enhancement: Bot Likelihood Scoring
@@ -2718,36 +3072,35 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
         if high_likelihood_bots.any():
             high_likelihood_indices = uncertain_indices[high_likelihood_bots]
             df.loc[high_likelihood_indices, 'user_category'] = 'bot'
-            df.loc[high_likelihood_indices, 'is_bot'] = True
+            df.loc[high_likelihood_indices, 'behavior_type'] = 'automated'
+            df.loc[high_likelihood_indices, 'automation_category'] = 'bot'
             df.loc[high_likelihood_indices, 'classification_confidence'] = 0.85
     
-    # Add interaction features for better bot detection
-    logger.info("  Adding bot interaction features...")
-    df = add_bot_interaction_features(df)
-    
+    # Bot interaction features are already added in main.py after Isolation Forest
     # Add new features to feature columns if they exist
     new_features = ['dl_user_per_log_users', 'user_scarcity_score', 
                    'download_concentration', 'bot_composite_score',
                    'anomaly_dl_interaction', 'temporal_irregularity']
     for feat in new_features:
-        if feat in df.columns and feat not in feature_columns:
+        if feat in df_uncertain.columns and feat not in feature_columns:
             feature_columns.append(feat)
     
     # Prepare features for Transformer
+    # Use df_uncertain for Transformer processing (still contains all uncertain locations, Stage 2 will filter later)
     # Use time_series_features if available, otherwise fallback to flat features
-    if 'time_series_features' in df.columns and df['time_series_features'].apply(lambda x: isinstance(x, list) and len(x) > 0).any():
+    if 'time_series_features' in df_uncertain.columns and df_uncertain['time_series_features'].apply(lambda x: isinstance(x, list) and len(x) > 0).any():
         logger.info("  Using time-series features for Transformer.")
         # Convert list of lists to 3D numpy array: [num_locations, sequence_length, num_features_per_window]
         # Pad shorter sequences with zeros to match `sequence_length`
-        max_seq_len = df['time_series_features'].apply(len).max()
+        max_seq_len = df_uncertain['time_series_features'].apply(len).max()
         if max_seq_len < sequence_length:
             logger.warning(f"  Max sequence length found ({max_seq_len}) is less than requested ({sequence_length}). Padding with zeros.")
         
         # Determine num_features_per_window from the first valid entry
-        valid_ts = df['time_series_features'].dropna()
+        valid_ts = df_uncertain['time_series_features'].dropna()
         if len(valid_ts) == 0:
             logger.warning("  No valid time-series features found. Falling back to flat features.")
-            X_ts = df[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns))
+            X_ts = df_uncertain[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns))
             sequence_length = 1
             num_features_per_window = len(feature_columns)
         else:
@@ -2756,12 +3109,12 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
 
             if num_features_per_window == 0:
                 logger.warning("  No features found in time_series_features. Falling back to flat features.")
-                X_ts = df[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns))
+                X_ts = df_uncertain[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns))
                 sequence_length = 1
                 num_features_per_window = len(feature_columns)
             else:
                 X_ts_list = []
-                for ts_list in df['time_series_features']:
+                for ts_list in df_uncertain['time_series_features']:
                     if isinstance(ts_list, list):
                         # Pad or truncate to desired sequence_length
                         if len(ts_list) < sequence_length:
@@ -2776,13 +3129,18 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 X_ts = np.array(X_ts_list)
     else:
         logger.info("  Time-series features not available or empty, falling back to flat features.")
-        X_ts = df[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns)) # Reshape flat features as sequence length 1
+        X_ts = df_uncertain[feature_columns].fillna(0).values.reshape(-1, 1, len(feature_columns)) # Reshape flat features as sequence length 1
         sequence_length = 1 # Override sequence_length if falling back to flat features
         num_features_per_window = len(feature_columns)
 
     # Step 2: Transformer-based feature encoding (no clustering)
     neural_predictions = None
     bot_predictions = None
+    classifier = None  # Initialize for feature importance analysis
+    X_tensor_for_importance = None
+    X_fixed_tensor_for_importance = None
+    device_for_importance = None
+    num_features_per_window_for_importance = None
     if use_transformer:
         logger.info("  Step 2/2: Encoding features with Transformer...")
         try:
@@ -2797,7 +3155,9 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             
             # Prepare fixed features (non-time-series features)
             fixed_feature_cols = [col for col in feature_columns if col != 'time_series_features_present']
-            X_fixed = df[fixed_feature_cols].fillna(0).values
+            # Filter to only columns that exist
+            fixed_feature_cols = [col for col in fixed_feature_cols if col in df_uncertain.columns]
+            X_fixed = df_uncertain[fixed_feature_cols].fillna(0).values
             
             # Scale fixed features
             fixed_scaler = StandardScaler()
@@ -2819,6 +3179,12 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             X_tensor = X_tensor.to(device)
             X_fixed_tensor = X_fixed_tensor.to(device)
             
+            # Store for feature importance analysis
+            X_tensor_for_importance = X_tensor
+            X_fixed_tensor_for_importance = X_fixed_tensor
+            device_for_importance = device
+            num_features_per_window_for_importance = num_features_per_window
+            
             # Self-supervised pre-training (if enabled)
             if enable_self_supervised:
                 logger.info("    Pre-training Transformer with self-supervised learning...")
@@ -2836,12 +3202,12 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             
             # Generate rule-based labels for training (pseudo-labels)
             logger.info("    Generating rule-based labels for classification training...")
-            rule_labels = _generate_rule_based_labels(df)
+            rule_labels = _generate_rule_based_labels(df_uncertain)
 
             # Generate SMART bot labels for multi-task learning
             logger.info("    Generating smart 'is_bot' labels for multi-task training...")
             # Use smart labels that capture nuanced bot patterns
-            hard_bot_labels, _ = generate_smart_bot_labels(df)
+            hard_bot_labels, _ = generate_smart_bot_labels(df_uncertain)
             is_bot_labels = hard_bot_labels  # Use hard labels for training
 
             
@@ -2990,8 +3356,10 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     if enable_neural_classification and neural_predictions is not None:
         logger.info("    Step 2: Applying neural classification...")
         
-        # Only apply neural predictions to non-hub locations
-        non_hub_mask = ~download_hub_mask
+        # Only apply neural predictions to uncertain locations (which are automated after Stage 1)
+        # Filter to locations that are in df_uncertain (uncertain_indices)
+        uncertain_mask_for_predictions = df.index.isin(uncertain_indices)
+        non_hub_mask = ~download_hub_mask & uncertain_mask_for_predictions
         
         if enable_confidence_classification and use_transformer:
             logger.info("    Applying confidence-based classification (Phase 6 enhancement)...")
@@ -3000,32 +3368,46 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 with torch.no_grad():
                     logits, bot_logits_conf, _ = classifier(X_tensor, X_fixed_tensor)
                 
-                # Apply confidence-based classification only to non-hub locations
+                # Apply confidence-based classification on df_uncertain
+                # df_uncertain indices correspond to uncertain_indices in the same order
                 df_temp = confidence_based_classification(
-                    df.copy(), logits, bot_logits_conf, category_map
+                    df_uncertain.copy(), logits, bot_logits_conf, category_map
                 )
-                # Copy results only for non-hub locations
-                df.loc[non_hub_mask, 'user_category'] = df_temp.loc[non_hub_mask, 'user_category']
-                if 'classification_confidence' in df_temp.columns:
-                    df.loc[non_hub_mask, 'classification_confidence'] = df_temp.loc[non_hub_mask, 'classification_confidence']
-                if 'needs_review' in df_temp.columns:
-                    df.loc[non_hub_mask, 'needs_review'] = df_temp.loc[non_hub_mask, 'needs_review']
+                # Copy results back to main df - df_uncertain indices match uncertain_indices order
+                for i, idx in enumerate(df_uncertain.index):
+                    if i < len(uncertain_indices):
+                        original_idx = uncertain_indices[i]
+                        if non_hub_mask.loc[original_idx] if isinstance(non_hub_mask, pd.Series) else non_hub_mask.iloc[i]:
+                            df.loc[original_idx, 'user_category'] = df_temp.loc[idx, 'user_category']
+                            if 'classification_confidence' in df_temp.columns:
+                                df.loc[original_idx, 'classification_confidence'] = df_temp.loc[idx, 'classification_confidence']
+                            if 'needs_review' in df_temp.columns:
+                                df.loc[original_idx, 'needs_review'] = df_temp.loc[idx, 'needs_review']
             except Exception as e:
                 logger.warning(f"    Confidence-based classification failed ({e}), using standard predictions")
+                # Map predictions back - df_uncertain and neural_predictions are in same order
                 for i, pred in enumerate(neural_predictions):
-                    if non_hub_mask.iloc[i]:
-                        df.iloc[i, df.columns.get_loc('user_category')] = category_map[pred]
+                    if i < len(uncertain_indices):
+                        original_idx = uncertain_indices[i]
+                        # Check if this location should get predictions (non-hub and in uncertain set)
+                        if i < len(df_uncertain):
+                            if not download_hub_mask.loc[original_idx]:
+                                df.loc[original_idx, 'user_category'] = category_map[pred]
         else:
-            # Standard neural predictions (only for non-hubs)
+            # Standard neural predictions - map back to original indices
             for i, pred in enumerate(neural_predictions):
-                if non_hub_mask.iloc[i]:
-                    df.iloc[i, df.columns.get_loc('user_category')] = category_map[pred]
+                if i < len(uncertain_indices):
+                    original_idx = uncertain_indices[i]
+                    # Only apply to non-hub locations
+                    if not download_hub_mask.loc[original_idx]:
+                        df.loc[original_idx, 'user_category'] = category_map[pred]
         
         # =========================================================================
-        # Step 3: Bot head override - BUT ONLY for non-hub locations
+        # Step 3: Bot head override - BUT ONLY for non-hub locations (uncertain indices only)
         # =========================================================================
         if enable_bot_head and bot_predictions is not None:
-            df['is_bot_neural'] = bot_predictions == 1
+            # Map bot_predictions back to original indices
+            df.loc[uncertain_indices, 'is_bot_neural'] = (bot_predictions == 1).tolist() if len(bot_predictions) == len(uncertain_indices) else False
             
             # Get config rules
             hub_rules = get_hub_protection_rules()
@@ -3043,10 +3425,18 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                  (df['downloads_per_user'] > 200))  # Small scale (≤100) + very high DL (>200)
             )
             
-            # Bot head override ONLY for non-hub locations with BOT patterns
+            # Bot head override ONLY for uncertain locations (automated) with BOT patterns
+            # Map bot_predictions to original indices
+            bot_pred_series = pd.Series(False, index=df.index)
+            if len(bot_predictions) == len(uncertain_indices):
+                for i, pred in enumerate(bot_predictions):
+                    if i < len(uncertain_indices):
+                        bot_pred_series.loc[uncertain_indices[i]] = (pred == 1)
+            
             # Key criteria for bots: Many users, low-moderate DL/user
             bot_head_bots = (
-                (bot_predictions == 1) & 
+                bot_pred_series &  # Bot prediction from neural network
+                df.index.isin(uncertain_indices) &  # Only uncertain locations
                 ~download_hub_mask &  # NOT a download hub
                 ~protected_from_bot &  # NOT protected from bot classification
                 (df['unique_users'] > bot_override_rule.get('min_users', 100)) &  # Bots have many users
@@ -3056,6 +3446,10 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
             if bot_head_bots.any():
                 logger.info(f"    Bot head override (filtered): {bot_head_bots.sum():,} locations marked as bots")
                 df.loc[bot_head_bots, 'user_category'] = 'bot'
+                # Set hierarchical classification
+                df.loc[bot_head_bots, 'behavior_type'] = 'automated'
+                df.loc[bot_head_bots, 'automation_category'] = 'bot'
+                df.loc[bot_head_bots, 'subcategory'] = 'generic_bot'
             
             # Log protected locations
             n_protected = protected_from_bot.sum()
@@ -3087,9 +3481,104 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
                 df.loc[suspicious_bot_pattern, 'user_category'] = 'bot'
                 if 'is_bot_neural' in df.columns:
                     df.loc[suspicious_bot_pattern, 'is_bot_neural'] = True
+                # Set hierarchical classification
+                df.loc[suspicious_bot_pattern, 'behavior_type'] = 'automated'
+                df.loc[suspicious_bot_pattern, 'automation_category'] = 'bot'
+                df.loc[suspicious_bot_pattern, 'subcategory'] = 'generic_bot'
     else:
         logger.info("    Using rule-based classification...")
         df = _apply_rule_based_classification(df)
+    
+    # =========================================================================
+    # TWO-STAGE CLASSIFICATION: Stage 2 - Malicious vs Legitimate (for automated)
+    # =========================================================================
+    if 'stage' in df.columns and 'bot_vs_legitimate_score' in df.columns:
+        logger.info("\n  Stage 2: Applying discriminative classification (malicious vs legitimate automation)...")
+        
+        # Only apply Stage 2 to automated locations (stage == 2)
+        automated_for_stage2 = (df['stage'] == 2) & (df['bot_vs_legitimate_score'].notna())
+        
+        if automated_for_stage2.any():
+            # Use discriminative score to separate malicious from legitimate
+            malicious_threshold = 0.3
+            legitimate_threshold = -0.3
+            
+            automated_df = df[automated_for_stage2]
+            likely_malicious = automated_df['bot_vs_legitimate_score'] > malicious_threshold
+            likely_legitimate = automated_df['bot_vs_legitimate_score'] < legitimate_threshold
+            ambiguous = ~(likely_malicious | likely_legitimate)
+            
+            logger.info(f"    Malicious (score > {malicious_threshold}): {likely_malicious.sum():,}")
+            logger.info(f"    Legitimate (score < {legitimate_threshold}): {likely_legitimate.sum():,}")
+            logger.info(f"    Ambiguous: {ambiguous.sum():,}")
+            
+            # Apply Stage 2 classification
+            automated_indices = automated_df.index
+            
+            # Malicious automation → Bot (unless already classified as hub by strong hub patterns)
+            if likely_malicious.any():
+                malicious_indices = automated_indices[likely_malicious]
+                # Only override if not already a protected hub
+                protected_mask = df.loc[malicious_indices, 'is_protected_hub'].fillna(False).values
+                override_mask = ~protected_mask
+
+                if override_mask.any():
+                    override_indices = malicious_indices[override_mask]
+                    df.loc[override_indices, 'user_category'] = 'bot'
+                    df.loc[override_indices, 'stage2_category'] = 'malicious'
+                    df.loc[override_indices, 'classification_confidence'] = df.loc[override_indices, 'classification_confidence'].fillna(0.8).clip(0.8, 1.0)
+                    # Hierarchical: malicious automation = automated -> bot
+                    df.loc[override_indices, 'behavior_type'] = 'automated'
+                    df.loc[override_indices, 'automation_category'] = 'bot'
+                    df.loc[override_indices, 'subcategory'] = 'coordinated_bot'
+
+                    logger.info(f"    Reclassified {override_mask.sum():,} malicious automation as bots")
+                if protected_mask.any():
+                    logger.info(f"    Protected {protected_mask.sum():,} locations from malicious override (hub patterns)")
+            
+            # Legitimate automation → Download Hub (override bot classification)
+            if likely_legitimate.any():
+                legitimate_indices = automated_indices[likely_legitimate]
+
+                # Override bot classification to hub for legitimate automation
+                currently_bot = (df.loc[legitimate_indices, 'user_category'] == 'bot').values
+
+                if currently_bot.any():
+                    override_indices = legitimate_indices[currently_bot]
+                    df.loc[override_indices, 'user_category'] = 'download_hub'
+                    df.loc[override_indices, 'stage2_category'] = 'legitimate'
+                    df.loc[override_indices, 'classification_confidence'] = df.loc[override_indices, 'classification_confidence'].fillna(0.75).clip(0.75, 1.0)
+                    # Hierarchical: legitimate automation = automated -> legitimate_automation
+                    df.loc[override_indices, 'behavior_type'] = 'automated'
+                    df.loc[override_indices, 'automation_category'] = 'legitimate_automation'
+                    df.loc[override_indices, 'subcategory'] = 'institutional_hub'
+
+                    logger.info(f"    Reclassified {currently_bot.sum():,} legitimate automation from bot to download_hub")
+
+                # Also mark locations that were already hubs
+                already_hub = (df.loc[legitimate_indices, 'user_category'] == 'download_hub').values
+                if already_hub.any():
+                    df.loc[legitimate_indices[already_hub], 'stage2_category'] = 'legitimate'
+                    # Set hierarchical for already-hub locations
+                    df.loc[legitimate_indices[already_hub], 'behavior_type'] = 'automated'
+                    df.loc[legitimate_indices[already_hub], 'automation_category'] = 'legitimate_automation'
+                    df.loc[legitimate_indices[already_hub], 'subcategory'] = 'mirror'
+            
+            # Ambiguous automation → Keep existing classification but flag for review
+            if ambiguous.any():
+                ambiguous_indices = automated_indices[ambiguous]
+                df.loc[ambiguous_indices, 'stage2_category'] = 'ambiguous'
+                df.loc[ambiguous_indices, 'needs_review'] = True
+                df.loc[ambiguous_indices, 'classification_confidence'] = df.loc[ambiguous_indices, 'classification_confidence'].fillna(0.5).clip(0, 0.7)
+                # Hierarchical: ambiguous automation defaults to automated -> bot (safer)
+                df.loc[ambiguous_indices, 'behavior_type'] = 'automated'
+                df.loc[ambiguous_indices, 'automation_category'] = 'bot'
+                df.loc[ambiguous_indices, 'subcategory'] = 'generic_bot'
+
+                logger.info(f"    Flagged {ambiguous.sum():,} ambiguous automation cases for review")
+    else:
+        if 'bot_vs_legitimate_score' not in df.columns:
+            logger.warning("    Stage 2 skipped: discriminative features not available")
     
     # =========================================================================
     # Merge stratified pre-filter results back
@@ -3104,30 +3593,28 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     # =========================================================================
     logger.info("    Applying hub protection...")
     df = _apply_hub_protection(df)
-    
-    # Set boolean flags based on category
-    df['is_bot'] = df['user_category'] == 'bot'
-    df['is_download_hub'] = df['user_category'] == 'download_hub'
+
+    # Set helper boolean flags based on category (for internal use)
     df['is_independent_user'] = df['user_category'] == 'independent_user'
     df['is_normal_user'] = df['user_category'] == 'normal'
-    
+
     # =========================================================================
     # Final Safety Check: ensure no high DL/user locations are classified as bots
     # =========================================================================
     logger.info("    Performing final safety check...")
     hub_rules = get_hub_protection_rules()
     high_dl_rule = hub_rules.get('high_dl_per_user', {})
-    
+
     final_hub_override = (
-        df['is_bot'] & 
+        (df['automation_category'] == 'bot') &
         (df['downloads_per_user'] > high_dl_rule.get('min_downloads_per_user', 500))
     )
     if final_hub_override.any():
         logger.warning(f"    Final safety check: overriding {final_hub_override.sum()} "
                        f"bot classifications with DL/user >{high_dl_rule.get('min_downloads_per_user', 500)} to hub")
-        df.loc[final_hub_override, 'is_bot'] = False
-        df.loc[final_hub_override, 'is_download_hub'] = True
         df.loc[final_hub_override, 'user_category'] = 'download_hub'
+        df.loc[final_hub_override, 'automation_category'] = 'legitimate_automation'
+        df.loc[final_hub_override, 'subcategory'] = 'mirror'
 
     # =========================================================================
     # Detailed Category Classification
@@ -3135,14 +3622,14 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     logger.info("    Classifying detailed categories...")
     df = _classify_detailed_categories(df)
 
-    # Log results
-    n_bots = df['is_bot'].sum()
-    n_hubs = df['is_download_hub'].sum()
+    # Log results using hierarchical columns
+    n_bots = (df['automation_category'] == 'bot').sum()
+    n_hubs = (df['user_category'] == 'download_hub').sum()
     n_independent = df['is_independent_user'].sum()
     n_normal = df['is_normal_user'].sum()
     n_other = (df['user_category'] == 'other').sum()
     n_needs_review = df['needs_review'].sum() if 'needs_review' in df.columns else 0
-    
+
     method_name = "Neural + Phase 6" if enable_neural_classification else "Rule-based"
     logger.info(f"\n  Final Classification (Transformer + {method_name}):")
     logger.info(f"    Bot locations: {n_bots:,} ({n_bots/len(df)*100:.1f}%)")
@@ -3163,7 +3650,106 @@ def classify_locations_deep(df: pd.DataFrame, feature_columns: List[str],
     logger.info("\n  Classifying detailed categories...")
     df = _classify_detailed_categories(df)
     
+    # Compute feature importance analysis if requested
+    if compute_feature_importance and feature_importance_output_dir:
+        if enable_neural_classification and use_transformer and classifier is not None:
+            logger.info("\n" + "=" * 70)
+            logger.info("Computing Deep Learning Feature Importance Analysis")
+            logger.info("=" * 70)
+            try:
+                fixed_feature_cols_for_imp = [col for col in feature_columns if col != 'time_series_features_present']
+                compute_deep_feature_importance(
+                    df=df,
+                    classifier=classifier,
+                    X_tensor=X_tensor_for_importance,
+                    X_fixed_tensor=X_fixed_tensor_for_importance,
+                    feature_columns=feature_columns,
+                    fixed_feature_cols=fixed_feature_cols_for_imp,
+                    device=device_for_importance,
+                    output_dir=feature_importance_output_dir,
+                    sequence_length=sequence_length if use_transformer else 1,
+                    num_features_per_window=num_features_per_window_for_importance
+                )
+            except Exception as e:
+                logger.warning(f"Feature importance analysis failed: {e}", exc_info=True)
+        else:
+            logger.warning("Feature importance analysis requested but Transformer was not used or failed. Skipping.")
+
+    # =========================================================================
+    # Finalize Hierarchical Classification
+    # =========================================================================
+    # Ensure all locations have hierarchical classification set
+    # Map any remaining user_category values to hierarchical structure
+    _finalize_hierarchical_classification(df)
+
+    # Log hierarchical classification summary
+    _log_hierarchical_summary(df)
+
     return df, cluster_df
+
+
+def _finalize_hierarchical_classification(df: pd.DataFrame) -> None:
+    """
+    Finalize hierarchical classification columns based on user_category.
+
+    Ensures all locations have consistent behavior_type, automation_category,
+    and subcategory values.
+    """
+    # Map user_category to hierarchical structure for any unset locations
+    category_mapping = {
+        'bot': ('automated', 'bot', 'generic_bot'),
+        'download_hub': ('automated', 'legitimate_automation', 'mirror'),
+        'independent_user': ('organic', None, 'individual_user'),
+        'normal': ('organic', None, 'research_group'),
+        'other': ('automated', 'bot', 'generic_bot'),  # Default uncertain to bot
+    }
+
+    for user_cat, (behavior, automation, subcat) in category_mapping.items():
+        mask = (df['user_category'] == user_cat) & (
+            (df['behavior_type'] == 'organic') & (df['automation_category'].isna())
+            | (df['subcategory'] == 'individual_user')  # Default values
+        )
+        # Only update if the hierarchical values haven't been explicitly set
+        # Check if subcategory is still at default
+        default_mask = mask & (df['subcategory'].isin(['individual_user', 'unclassified', None]))
+        if default_mask.any():
+            df.loc[default_mask, 'behavior_type'] = behavior
+            df.loc[default_mask, 'automation_category'] = automation
+            df.loc[default_mask, 'subcategory'] = subcat
+
+
+def _log_hierarchical_summary(df: pd.DataFrame) -> None:
+    """Log hierarchical classification summary."""
+    total = len(df)
+    if total == 0:
+        return
+
+    logger.info("\n  ============================================================")
+    logger.info("  HIERARCHICAL CLASSIFICATION SUMMARY")
+    logger.info("  ============================================================")
+
+    # Level 1: Behavior Type
+    logger.info("\n  Level 1 - Behavior Type:")
+    for bt in ['organic', 'automated']:
+        count = (df['behavior_type'] == bt).sum()
+        pct = count / total * 100
+        logger.info(f"    {bt.upper()}: {count:,} ({pct:.1f}%)")
+
+    # Level 2: Automation Category (for automated only)
+    automated_count = (df['behavior_type'] == 'automated').sum()
+    if automated_count > 0:
+        logger.info("\n  Level 2 - Automation Category (within AUTOMATED):")
+        for ac in ['bot', 'legitimate_automation']:
+            count = (df['automation_category'] == ac).sum()
+            pct = count / automated_count * 100 if automated_count > 0 else 0
+            logger.info(f"    {ac.upper()}: {count:,} ({pct:.1f}% of automated)")
+
+    # Level 3: Subcategories (top 10)
+    logger.info("\n  Level 3 - Top Subcategories:")
+    subcat_counts = df['subcategory'].value_counts().head(10)
+    for subcat, count in subcat_counts.items():
+        pct = count / total * 100
+        logger.info(f"    {subcat}: {count:,} ({pct:.1f}%)")
 
 
 # =============================================================================

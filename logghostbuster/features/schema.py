@@ -59,24 +59,9 @@ class LogSchema:
         return cls(**data)
 
 
-# Predefined schemas for common log formats
-EBI_SCHEMA = LogSchema(
-    location_field="geo_location",
-    country_field="country",
-    city_field="geoip_city_name",
-    user_field="user",
-    project_field="accession",
-    timestamp_field="timestamp",
-    year_field="year",
-    min_location_downloads=1,  # Include all locations (can be increased to filter noise)
-    min_year=2020,
-)
-
-
 # Registry of available schemas
-SCHEMA_REGISTRY: Dict[str, LogSchema] = {
-    "ebi": EBI_SCHEMA,
-}
+# Note: Provider-specific schemas (like EBI_SCHEMA) are registered by their respective packages
+SCHEMA_REGISTRY: Dict[str, LogSchema] = {}
 
 
 def get_schema(name: str) -> LogSchema:

@@ -62,9 +62,18 @@ def compute_feature_importances(analysis_df, feature_columns, labels, output_dir
     gini_importances = pd.Series(rf.feature_importances_, index=feature_columns).sort_values(ascending=False)
     
     # Permutation importances (roc_auc scorer)
-    perm = permutation_importance(
-        rf, X, y, n_repeats=5, random_state=42, n_jobs=-1, scoring='roc_auc'
-    )
+    # Use n_jobs=1 to avoid joblib issues on some systems
+    import os
+    n_jobs_val = min(os.cpu_count() or 1, 4)  # Limit to 4 to avoid resource issues
+    try:
+        perm = permutation_importance(
+            rf, X, y, n_repeats=5, random_state=42, n_jobs=n_jobs_val, scoring='roc_auc'
+        )
+    except Exception as e:
+        logger.warning(f"Parallel permutation importance failed, trying sequential: {e}")
+        perm = permutation_importance(
+            rf, X, y, n_repeats=5, random_state=42, n_jobs=1, scoring='roc_auc'
+        )
     perm_importances = pd.Series(perm.importances_mean, index=feature_columns).sort_values(ascending=False)
     
     os.makedirs(output_dir, exist_ok=True)

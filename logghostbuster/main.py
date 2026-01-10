@@ -10,15 +10,14 @@ from .utils import logger, format_number
 from .features.providers.ebi import extract_location_features
 from .config import FEATURE_COLUMNS, APP_CONFIG
 from .models import (
-    train_isolation_forest, 
-    compute_feature_importances, 
-    classify_locations, 
-    classify_locations_ml, 
+    train_isolation_forest,
+    compute_feature_importances,
+    classify_locations_hierarchical,
     classify_locations_deep
 )
 from .reports import annotate_downloads
 from .reports import generate_report
-from .features.schema import LogSchema, EBI_SCHEMA
+from .features.providers.ebi import LogSchema, EBI_SCHEMA
 from .features.base import BaseFeatureExtractor
 from typing import Optional, List
 
@@ -110,6 +109,7 @@ def run_bot_annotator(
     sequence_length: int = 12,
     annotate: bool = True,
     output_strategy: str = 'new_file',
+    provider: str = 'ebi',
 ):
     """
     Main function to detect bots and download hubs, and annotate the parquet file.
@@ -133,10 +133,16 @@ def run_bot_annotator(
             - 'new_file': Create a new file with '_annotated' suffix (safest, recommended)
             - 'reports_only': Don't write to parquet, only generate reports
             - 'overwrite': Rewrite the original file (may fail if file is locked)
-    
+        provider: Log provider for configuration and rules (default: 'ebi').
+            Providers define schema mappings, classification thresholds, and taxonomy.
+            Available providers can be listed with list_available_providers().
+
     Returns:
         Dictionary with detection results and statistics
     """
+    # Set active provider for configuration lookups
+    from .config import set_active_provider
+    set_active_provider(provider)
     logger.info("=" * 70)
     logger.info("Bot and Download Hub Annotator")
     logger.info("=" * 70)
@@ -221,19 +227,65 @@ def run_bot_annotator(
             custom_extractors=custom_extractors
         )
         
-        # Filter valid rows
-        valid_mask = location_df[FEATURE_COLUMNS[:-1]].notna().all(axis=1) # Exclude the placeholder for NA check
+        # Filter valid rows - only check features that exist at this point
+        # Advanced behavioral features are added later, so exclude them from validation here
+        basic_features = [f for f in FEATURE_COLUMNS[:-1] if f in location_df.columns]  # Exclude the placeholder for NA check
+        if len(basic_features) > 0:
+            valid_mask = location_df[basic_features].notna().all(axis=1)
+        else:
+            valid_mask = pd.Series([True] * len(location_df), index=location_df.index)
         analysis_df = location_df[valid_mask].copy()
         analysis_df['time_series_features_present'] = analysis_df['time_series_features'].apply(lambda x: 1 if x is not None and len(x) > 0 else 0)
 
         logger.info(f"Analyzing {len(analysis_df):,} locations")
         
+        # Extract advanced behavioral features (NEW - High Priority Features)
+        if classification_method.lower() == 'deep':
+            logger.info("\nExtracting advanced behavioral features (burst patterns, circadian rhythms, user coordination)...")
+            from logghostbuster.features.providers.ebi import (
+                extract_advanced_behavioral_features,
+                add_bot_signature_features,
+                add_bot_interaction_features
+            )
+            try:
+                analysis_df = extract_advanced_behavioral_features(
+                    analysis_df,
+                    actual_input_parquet,
+                    conn,
+                    schema=schema if schema is not None else EBI_SCHEMA
+                )
+                logger.info("✓ Advanced behavioral features extracted successfully")
+            except Exception as e:
+                logger.warning(f"Advanced behavioral feature extraction failed: {e}")
+                logger.info("Continuing with basic features only...")
+            
+            # Extract discriminative features (NEW - Two-Stage Classification)
+            logger.info("\nExtracting discriminative features (malicious vs legitimate automation)...")
+            from logghostbuster.features.providers.ebi import extract_discriminative_features
+            try:
+                analysis_df = extract_discriminative_features(
+                    analysis_df,
+                    actual_input_parquet,
+                    conn,
+                    schema=schema if schema is not None else EBI_SCHEMA
+                )
+                logger.info("✓ Discriminative features extracted successfully")
+            except Exception as e:
+                logger.warning(f"Discriminative feature extraction failed: {e}")
+                logger.info("Continuing without discriminative features...")
+        
         # Step 2: Train Isolation Forest
         logger.info("\n" + "=" * 70)
         logger.info("Step 2: Training Isolation Forest")
         logger.info("=" * 70)
+        # Filter feature columns to only those that actually exist in the dataframe
+        available_features = [f for f in FEATURE_COLUMNS if f != 'time_series_features_present' and f in analysis_df.columns]
+        logger.info(f"Using {len(available_features)} features for Isolation Forest training")
+        if len(available_features) < len(FEATURE_COLUMNS) - 1:
+            missing = [f for f in FEATURE_COLUMNS if f != 'time_series_features_present' and f not in analysis_df.columns]
+            logger.info(f"Note: {len(missing)} features not available: {missing[:5]}{'...' if len(missing) > 5 else ''}")
         predictions, scores, _, _ = train_isolation_forest(
-            analysis_df, [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'], contamination=contamination
+            analysis_df, available_features, contamination=contamination
         )
         
         analysis_df['is_anomaly'] = predictions == -1
@@ -242,15 +294,39 @@ def run_bot_annotator(
         n_anomalies = analysis_df['is_anomaly'].sum()
         logger.info(f"Detected {n_anomalies:,} anomalous locations")
         
+        # Add bot interaction and signature features now that anomaly_score is available
+        if classification_method.lower() == 'deep':
+            try:
+                from logghostbuster.features.providers.ebi import (
+                    add_bot_interaction_features,
+                    add_bot_signature_features
+                )
+                # Add interaction features (needs anomaly_score which now exists)
+                analysis_df = add_bot_interaction_features(analysis_df)
+                logger.info("✓ Bot interaction features added successfully")
+                
+                # Add signature features (also needs anomaly_score and other features)
+                analysis_df = add_bot_signature_features(analysis_df)
+                logger.info("✓ Bot signature features added successfully")
+            except Exception as e:
+                logger.warning(f"Bot feature addition failed: {e}")
+                logger.info("Continuing without additional features...")
+        
         # Optional: compute feature importances for interpretability
-        if compute_importances:
+        # Note: For 'deep' method, feature importance is computed within classify_locations_deep
+        # So we only compute isolation forest importances for 'rules' method
+        if compute_importances and classification_method.lower() != 'deep':
             imp_dir = os.path.join(output_dir, 'feature_importances')
-            compute_feature_importances(
-                analysis_df,
-                [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'],
-                analysis_df['is_anomaly'],
-                imp_dir
-            )
+            try:
+                compute_feature_importances(
+                    analysis_df,
+                    [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'],
+                    analysis_df['is_anomaly'],
+                    imp_dir
+                )
+            except Exception as e:
+                logger.warning(f"Feature importance computation failed: {e}")
+                logger.info("Continuing without isolation forest feature importances...")
         
         # Step 3: Classify locations
         logger.info("\n" + "=" * 70)
@@ -259,15 +335,29 @@ def run_bot_annotator(
         
         cluster_df = None # Initialize cluster_df
 
-        if classification_method.lower() == 'ml':
-            logger.info("Using supervised ML-based classification...")
-            analysis_df = classify_locations_ml(analysis_df, [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'])
-        elif classification_method.lower() == 'deep':
+        if classification_method.lower() == 'deep':
             logger.info("Using deep architecture classification (Isolation Forest + Transformers)...")
+            # Set up feature importance output directory if requested
+            feature_importance_dir = None
+            if compute_importances:
+                feature_importance_dir = os.path.join(output_dir, 'feature_importances_deep')
+                logger.info(f"Feature importance analysis will be saved to: {feature_importance_dir}")
+            
+            # Filter feature columns to only those that actually exist in the dataframe
+            available_features_for_deep = [f for f in FEATURE_COLUMNS if f != 'time_series_features_present' and f in analysis_df.columns]
+            logger.info(f"Using {len(available_features_for_deep)} features for deep classification")
+            if len(available_features_for_deep) < len(FEATURE_COLUMNS) - 1:
+                missing_deep = [f for f in FEATURE_COLUMNS if f != 'time_series_features_present' and f not in analysis_df.columns]
+                logger.info(f"Note: {len(missing_deep)} features not available for deep classification: {missing_deep[:5]}{'...' if len(missing_deep) > 5 else ''}")
+            
             analysis_df, cluster_df = classify_locations_deep(analysis_df, 
-                                                  [f for f in FEATURE_COLUMNS if f != 'time_series_features_present'], 
+                                                  available_features_for_deep, 
                                                   contamination=contamination, 
-                                                  sequence_length=sequence_length)
+                                                  sequence_length=sequence_length,
+                                                  compute_feature_importance=compute_importances,
+                                                  feature_importance_output_dir=feature_importance_dir,
+                                                  input_parquet=actual_input_parquet,
+                                                  conn=conn)
         elif classification_method.lower() == 'pattern':
             # Pattern discovery has been merged into deep architecture
             raise ValueError(
@@ -276,13 +366,78 @@ def run_bot_annotator(
                 "--enable-behavioral-extraction and --encoder-type lstm|transformer|hybrid"
             )
         elif classification_method.lower() == 'rules':
-            logger.info("Using rule-based classification...")
-            analysis_df = classify_locations(analysis_df)
+            logger.info("Using rule-based classification with hierarchical taxonomy...")
+            # Apply hierarchical classification
+            analysis_df = classify_locations_hierarchical(analysis_df)
         else:
-            raise ValueError(f"Unknown classification method: {classification_method}. Must be 'rules', 'ml', or 'deep'")
+            raise ValueError(f"Unknown classification method: {classification_method}. Must be 'rules' or 'deep'")
         
-        bot_locs = analysis_df[analysis_df['is_bot']].copy()
-        hub_locs = analysis_df[analysis_df['is_download_hub']].copy()
+        # Feature Usage Validation (NEW - High Priority Feature)
+        if classification_method.lower() == 'deep':
+            logger.info("\n" + "=" * 70)
+            logger.info("Step 4: Feature Usage Validation")
+            logger.info("=" * 70)
+            try:
+                from logghostbuster.models.classification.feature_validation import validate_feature_usage
+                import json
+                
+                # Get predictions for validation
+                if 'automation_category' in analysis_df.columns:
+                    predictions = (analysis_df['automation_category'] == 'bot').astype(int).values
+                elif 'bot_likelihood_score' in analysis_df.columns:
+                    predictions = analysis_df['bot_likelihood_score'].values
+                else:
+                    predictions = (analysis_df['user_category'] == 'bot').astype(int).values
+                
+                # Get all feature columns
+                all_feature_cols = [col for col in analysis_df.columns
+                                   if col not in ['geo_location', 'country', 'city', 'user_category',
+                                                 'behavior_type', 'automation_category', 'subcategory',
+                                                 'classification_confidence', 'needs_review',
+                                                 'time_series_features', 'is_anomaly', 'anomaly_score']]
+                
+                validation_results = validate_feature_usage(
+                    analysis_df,
+                    all_feature_cols,
+                    predictions
+                )
+                
+                # Save validation results
+                validation_file = os.path.join(output_dir, 'feature_validation.json')
+                with open(validation_file, 'w') as f:
+                    json.dump(validation_results, f, indent=2, default=str)
+                logger.info(f"\nValidation results saved to: {validation_file}")
+                
+                if not validation_results.get('passes_70_percent_threshold', False):
+                    logger.warning("⚠️  WARNING: Behavioral features are below 70% threshold!")
+                    logger.warning(f"   Current: {validation_results.get('behavioral_percentage', 0):.1f}%")
+                    logger.warning("   Consider adjusting feature weights or extracting more behavioral features")
+                else:
+                    logger.info(f"✓ Validation PASSED: {validation_results.get('behavioral_percentage', 0):.1f}% behavioral features")
+                    
+            except Exception as e:
+                logger.warning(f"Feature validation failed: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Filter locations by hierarchical classification
+        # Check if hierarchical columns exist (should exist for rules method, may exist for deep)
+        if 'automation_category' in analysis_df.columns:
+            bot_locs = analysis_df[analysis_df['automation_category'] == 'bot'].copy()
+        elif 'is_bot' in analysis_df.columns:
+            # Fallback to legacy column if hierarchical not available
+            bot_locs = analysis_df[analysis_df['is_bot']].copy()
+        else:
+            bot_locs = pd.DataFrame()
+        
+        hub_subcategories = {'mirror', 'institutional_hub', 'data_aggregator'}
+        if 'subcategory' in analysis_df.columns:
+            hub_locs = analysis_df[analysis_df['subcategory'].isin(hub_subcategories)].copy()
+        elif 'is_download_hub' in analysis_df.columns:
+            # Fallback to legacy column if hierarchical not available
+            hub_locs = analysis_df[analysis_df['is_download_hub']].copy()
+        else:
+            hub_locs = pd.DataFrame()
         
         # For deep architecture method, also show independent users and categories
         independent_locs = pd.DataFrame()  # Initialize empty
@@ -363,9 +518,14 @@ def run_bot_annotator(
             if output_strategy == 'overwrite' and output_parquet is None:
                 output_parquet = input_parquet
             
-            annotated_file = annotate_downloads(conn, actual_input_parquet, output_parquet, 
+            # Pass location_df for hierarchical columns (both rules and deep methods now support hierarchical)
+            # Check if hierarchical columns exist
+            has_hierarchical = all(col in analysis_df.columns for col in ['behavior_type', 'automation_category', 'subcategory'])
+            location_df_for_annotation = analysis_df if has_hierarchical else None
+            annotated_file = annotate_downloads(conn, actual_input_parquet, output_parquet,
                                                 bot_locs, hub_locs, output_dir,
-                                                output_strategy=output_strategy)
+                                                output_strategy=output_strategy,
+                                                location_df=location_df_for_annotation)
         else:
             logger.info("Annotation skipped (annotate=False and output_strategy != 'reports_only').")
         
@@ -380,8 +540,25 @@ def run_bot_annotator(
         # recomputing from the raw parquet.
         if 'total_downloads' in analysis_df.columns:
             total_downloads = int(analysis_df['total_downloads'].sum())
-            bot_downloads = int(analysis_df.loc[analysis_df['is_bot'], 'total_downloads'].sum())
-            hub_downloads = int(analysis_df.loc[analysis_df['is_download_hub'], 'total_downloads'].sum())
+            
+            # Use hierarchical columns if available, fallback to legacy
+            if 'automation_category' in analysis_df.columns:
+                bot_mask = analysis_df['automation_category'] == 'bot'
+            elif 'is_bot' in analysis_df.columns:
+                bot_mask = analysis_df['is_bot']
+            else:
+                bot_mask = pd.Series(False, index=analysis_df.index)
+            
+            hub_subcategories = {'mirror', 'institutional_hub', 'data_aggregator'}
+            if 'subcategory' in analysis_df.columns:
+                hub_mask = analysis_df['subcategory'].isin(hub_subcategories)
+            elif 'is_download_hub' in analysis_df.columns:
+                hub_mask = analysis_df['is_download_hub']
+            else:
+                hub_mask = pd.Series(False, index=analysis_df.index)
+            
+            bot_downloads = int(analysis_df.loc[bot_mask, 'total_downloads'].sum())
+            hub_downloads = int(analysis_df.loc[hub_mask, 'total_downloads'].sum())
 
             stats: dict = {
                 'total': total_downloads,
@@ -437,7 +614,22 @@ def run_bot_annotator(
                 f"({stats['other_downloads']/stats['total']*100:.2f}%)"
             )
         logger.info(f"Normal downloads: {format_number(stats['normal'])} ({stats['normal']/stats['total']*100:.2f}%)")
-        
+
+        # Log hierarchical classification statistics (only for deep method)
+        if classification_method.lower() == 'deep' and 'behavior_type' in analysis_df.columns:
+            logger.info("\nHierarchical Classification Statistics (Deep Method):")
+            total = len(analysis_df)
+            organic_count = (analysis_df['behavior_type'] == 'organic').sum()
+            automated_count = (analysis_df['behavior_type'] == 'automated').sum()
+            logger.info(f"  ORGANIC locations: {organic_count:,} ({organic_count/total*100:.1f}%)")
+            logger.info(f"  AUTOMATED locations: {automated_count:,} ({automated_count/total*100:.1f}%)")
+
+            if 'automation_category' in analysis_df.columns and automated_count > 0:
+                bot_count = (analysis_df['automation_category'] == 'bot').sum()
+                legit_count = (analysis_df['automation_category'] == 'legitimate_automation').sum()
+                logger.info(f"    - BOT: {bot_count:,} ({bot_count/automated_count*100:.1f}% of automated)")
+                logger.info(f"    - LEGITIMATE_AUTOMATION: {legit_count:,} ({legit_count/automated_count*100:.1f}% of automated)")
+
         # Step 6: Save analysis and generate report
         logger.info("\n" + "=" * 70)
         logger.info("Step 6: Generating reports")
@@ -465,6 +657,8 @@ def run_bot_annotator(
             logger.info("  - No parquet file written (reports_only strategy)")
         logger.info(f"  - {output_dir}/bot_detection_report.txt")
         logger.info(f"  - {output_dir}/location_analysis.csv")
+        logger.info(f"  - {output_dir}/report.html (interactive HTML report)")
+        logger.info(f"  - {output_dir}/plots/ (visualization charts)")
         
         return {
             'bot_locations': len(bot_locs),
@@ -509,8 +703,8 @@ def main():
     parser.add_argument('--sample-size', '-s', type=int, default=None,
                        help='Randomly sample N records from all years before processing (e.g., 1000000 for 1M records)')
     parser.add_argument('--classification-method', '-m', type=str, default='rules',
-                       choices=['rules', 'ml', 'deep'],
-                       help='Classification method: "rules" for rule-based (default), "ml" for supervised ML-based, or "deep" for deep architecture (Isolation Forest + Transformers)')
+                       choices=['rules', 'deep'],
+                       help='Classification method: "rules" for rule-based (default) or "deep" for deep architecture (Isolation Forest + Transformers)')
     parser.add_argument('--min-location-downloads', type=int, default=None,
                        help='Minimum downloads required for a location to be included (default: 1, set higher to filter noise)')
     parser.add_argument('--time-window', type=str, default='month',
@@ -523,13 +717,32 @@ def main():
                        help='Output file strategy: "new_file" creates annotated file with _annotated suffix (default), "reports_only" only generates reports, "overwrite" rewrites original file')
     parser.add_argument('--reports-only', action='store_true',
                        help='Shortcut flag: Only generate reports, skip parquet annotation (equivalent to --output-strategy reports_only)')
-    
+    parser.add_argument('--provider', '-p', type=str, default='ebi',
+                       help='Log provider for configuration and rules (default: ebi). '
+                            'Use --list-providers to see available providers.')
+    parser.add_argument('--list-providers', action='store_true',
+                       help='List available providers and exit')
+
     args = parser.parse_args()
+
+    # Handle --list-providers
+    if args.list_providers:
+        from .config import list_available_providers
+        providers = list_available_providers()
+        print("Available providers:")
+        for p in providers:
+            print(f"  - {p}")
+        return
     
     # If --reports-only is set, override output_strategy
     if args.reports_only:
         args.output_strategy = 'reports_only'
-    
+
+    # Set the active provider for configuration
+    from .config import set_active_provider
+    set_active_provider(args.provider)
+    logger.info(f"Using provider: {args.provider}")
+
     try:
         run_bot_annotator(
             args.input,
@@ -542,7 +755,8 @@ def main():
             min_location_downloads=args.min_location_downloads,
             time_window=args.time_window,
             sequence_length=args.sequence_length,
-            output_strategy=args.output_strategy
+            output_strategy=args.output_strategy,
+            provider=args.provider
         )
         
         logger.info("\nDone!")
