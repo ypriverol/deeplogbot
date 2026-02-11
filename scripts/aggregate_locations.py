@@ -29,7 +29,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 # Load config directly to avoid torch import chain
-config_path = project_root / 'logghostbuster' / 'config.yaml'
+config_path = project_root / 'deeplogbot' / 'config.yaml'
 with open(config_path, 'r') as f:
     APP_CONFIG = yaml.safe_load(f)
 

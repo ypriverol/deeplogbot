@@ -1,10 +1,10 @@
-# LogGhostBuster
+# DeepLogBot
 
 Bot detection and traffic classification for scientific data repository logs.
 
 ## Overview
 
-LogGhostBuster (CLI: `deeplogbot`) detects and classifies download patterns in scientific data repository logs, distinguishing between:
+DeepLogBot (CLI: `deeplogbot`) detects and classifies download patterns in scientific data repository logs, distinguishing between:
 
 - **Organic users** — Human researchers with natural download patterns
 - **Bots** — Automated scrapers, crawlers, and coordinated bot farms
@@ -37,7 +37,7 @@ behavior_type (Level 1)
 
 ## Classification Methods
 
-LogGhostBuster provides **2 classification methods**:
+DeepLogBot provides **2 classification methods**:
 
 | Method | Macro F1 | Speed | Description |
 |--------|----------|-------|-------------|
@@ -107,7 +107,7 @@ deeplogbot -i data.parquet -o output/ -m deep --sample-size 1000000
 ### Python API
 
 ```python
-from logghostbuster import run_bot_annotator
+from deeplogbot import run_bot_annotator
 
 # Rule-based classification
 results = run_bot_annotator(
@@ -130,7 +130,7 @@ print(f"Hubs detected: {results['hub_count']}")
 ## Project Structure
 
 ```
-logghostbuster/
+deeplogbot/
 ├── __init__.py                  # Package exports
 ├── main.py                      # CLI entry point and pipeline
 ├── config.py                    # Configuration loading
@@ -177,7 +177,7 @@ logghostbuster/
 
 ## Configuration
 
-Configuration is in `logghostbuster/config.yaml`:
+Configuration is in `deeplogbot/config.yaml`:
 
 ```yaml
 isolation_forest:
@@ -200,6 +200,73 @@ classification:
 deep_reconciliation:
   override_threshold: 0.7
   strict_threshold: 0.8
+```
+
+## Classifying a Download Parquet File
+
+Given a parquet file of download logs (one row per download event), DeepLogBot aggregates records by geographic location, extracts ~117 behavioral and discriminative features, classifies each location as bot/hub/organic, and writes a new annotated parquet with classification columns appended to every row.
+
+### Input format
+
+The input parquet must contain at minimum:
+
+| Column | Description |
+|--------|-------------|
+| `accession` | Dataset accession (e.g., `PXD000001`) |
+| `geo_location` | Geographic location string (city/region) |
+| `country` | Country name or code |
+| `year` | Download year |
+| `date` | Download date |
+
+### Running classification
+
+```bash
+# Classify with the deep method (recommended) — writes <input>_annotated.parquet
+deeplogbot -i downloads.parquet -o output/ -m deep
+
+# Classify with rules (faster, no torch required)
+deeplogbot -i downloads.parquet -o output/ -m rules
+
+# For large files, sample first to speed up classification
+deeplogbot -i downloads.parquet -o output/ -m deep --sample-size 5000000
+```
+
+The annotated parquet is written to the output directory with an `_annotated` suffix (e.g., `output/downloads_annotated.parquet`). You can also specify an explicit output path:
+
+```bash
+deeplogbot -i downloads.parquet -o output/ -m deep --output output/classified.parquet
+```
+
+### Output strategies
+
+| Strategy | Flag | Behavior |
+|----------|------|----------|
+| `new_file` (default) | `--output-strategy new_file` | Creates `<input>_annotated.parquet` in the output directory |
+| `overwrite` | `--output-strategy overwrite` | Rewrites the original parquet in place |
+| `reports_only` | `--reports-only` | Generates text/HTML reports without writing a parquet |
+
+### Using the annotated parquet
+
+```python
+import duckdb
+
+conn = duckdb.connect()
+df = conn.execute("""
+    SELECT accession, country, year,
+           is_bot, is_hub, is_organic,
+           behavior_type, automation_category, subcategory
+    FROM read_parquet('output/downloads_annotated.parquet')
+    LIMIT 10
+""").df()
+
+# Filter to clean (non-bot, non-hub) downloads
+clean = conn.execute("""
+    SELECT accession, country, COUNT(*) as downloads
+    FROM read_parquet('output/downloads_annotated.parquet')
+    WHERE is_bot = false AND is_hub = false
+    GROUP BY accession, country
+    ORDER BY downloads DESC
+""").df()
 ```
 
 ## Output Format

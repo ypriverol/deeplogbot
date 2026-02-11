@@ -31,8 +31,8 @@ import numpy as np
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from logghostbuster.main import run_bot_annotator
-from logghostbuster.utils import logger
+from deeplogbot.main import run_bot_annotator
+from deeplogbot.utils import logger
 
 
 def format_time(seconds: float) -> str:
@@ -677,7 +677,7 @@ def benchmark_methods(
     os.makedirs(os.path.join(output_dir, 'results'), exist_ok=True)
 
     logger.info("=" * 80)
-    logger.info("LOGGHOSTBUSTER BENCHMARK SUITE")
+    logger.info("DEEPLOGBOT BENCHMARK SUITE")
     logger.info("=" * 80)
     logger.info(f"Input: {input_parquet}")
     logger.info(f"Methods: {', '.join(methods)}")

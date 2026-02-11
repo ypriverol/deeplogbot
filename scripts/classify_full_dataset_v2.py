@@ -56,7 +56,7 @@ def main():
     # and pass sample_size=None to use all data in the sample
     print("\nRunning Deep classification pipeline...")
 
-    from logghostbuster.main import run_bot_annotator
+    from deeplogbot.main import run_bot_annotator
 
     result = run_bot_annotator(
         input_parquet=str(SAMPLE_PARQUET),

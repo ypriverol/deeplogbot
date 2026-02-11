@@ -26,8 +26,8 @@ import pandas as pd
 import numpy as np
 import duckdb
 
-from logghostbuster.main import run_bot_annotator
-from logghostbuster.utils import logger
+from deeplogbot.main import run_bot_annotator
+from deeplogbot.utils import logger
 
 
 def format_time(seconds: float) -> str:
@@ -146,7 +146,7 @@ def generate_comparison_report(results: dict, output_dir: str, sample_size: int)
 
     report = []
     report.append("=" * 80)
-    report.append("LOGGHOSTBUSTER ALGORITHM BENCHMARK REPORT")
+    report.append("DEEPLOGBOT ALGORITHM BENCHMARK REPORT")
     report.append("=" * 80)
     report.append(f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     report.append(f"Sample Size: {sample_size:,} records")
@@ -313,12 +313,12 @@ CONSIDER REMOVING (Experimental/Redundant):
   - improved_clustering.py: Merged improvements into main unsupervised
 
 FILES TO POTENTIALLY REMOVE:
-  - logghostbuster/models/unsupervised/exploratory_clustering.py
-  - logghostbuster/models/unsupervised/pure_unsupervised.py
-  - logghostbuster/models/unsupervised/improved_clustering.py
-  - logghostbuster/models/unsupervised/hierarchical_clustering.py
-  - logghostbuster/models/unsupervised/representation_learning.py
-  - logghostbuster/models/unsupervised/training.py (if not used by main methods)
+  - deeplogbot/models/unsupervised/exploratory_clustering.py
+  - deeplogbot/models/unsupervised/pure_unsupervised.py
+  - deeplogbot/models/unsupervised/improved_clustering.py
+  - deeplogbot/models/unsupervised/hierarchical_clustering.py
+  - deeplogbot/models/unsupervised/representation_learning.py
+  - deeplogbot/models/unsupervised/training.py (if not used by main methods)
 """)
 
     report_text = "\n".join(report)
@@ -366,7 +366,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     logger.info("=" * 70)
-    logger.info("LOGGHOSTBUSTER ALGORITHM BENCHMARK")
+    logger.info("DEEPLOGBOT ALGORITHM BENCHMARK")
     logger.info("=" * 70)
     logger.info(f"Input: {args.input}")
     logger.info(f"Sample size: {args.sample_size:,}")

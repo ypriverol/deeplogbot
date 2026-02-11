@@ -482,8 +482,8 @@ def figure_4_protocols(output_dir):
 
 
 def figure_5_concentration(output_dir):
-    """Figure 5: Rank-frequency log-log (A) + consistency heatmap (B)."""
-    print("  Figure 5: Concentration + consistency...")
+    """Figure 5: Rank-frequency log-log (A) + consistency heatmap (B) + citations vs downloads (C)."""
+    print("  Figure 5: Concentration + consistency + citations...")
     stats_path = ANALYSIS_DIR / 'concentration_stats.json'
     top_path = ANALYSIS_DIR / 'top_datasets.csv'
 
@@ -532,11 +532,13 @@ def figure_5_concentration(output_dir):
         except Exception as e:
             print(f"    Warning: heatmap query failed: {e}")
 
-    # Layout: rank-frequency on left, heatmap on right (wider)
-    fig = plt.figure(figsize=(16, 7))
-    gs = gridspec.GridSpec(1, 2, width_ratios=[0.8, 1.2], wspace=0.3)
+    # Layout: top row = A (rank-freq) + B (heatmap), bottom row = C (citations)
+    fig = plt.figure(figsize=(16, 12))
+    gs = gridspec.GridSpec(2, 2, width_ratios=[0.8, 1.2], height_ratios=[1, 0.75],
+                           wspace=0.3, hspace=0.35)
     ax1 = fig.add_subplot(gs[0, 0])
     ax2 = fig.add_subplot(gs[0, 1])
+    ax3 = fig.add_subplot(gs[1, :])
 
     # ---- Panel A: Rank-frequency (log-log) ----
     ranks = np.arange(1, len(downloads) + 1)
@@ -601,6 +603,65 @@ def figure_5_concentration(output_dir):
     else:
         ax2.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax2.transAxes)
         ax2.set_title('(B) Top 25 Datasets: Download Consistency', fontsize=11, fontweight='bold', loc='left')
+
+    # ---- Panel C: Citations vs Downloads (scatter, log-log) ----
+    from scipy import stats as sp_stats
+    citation_cache = ANALYSIS_DIR / 'europepmc_citations.json'
+    if citation_cache.exists() and top_path.exists():
+        with open(citation_cache) as f:
+            cite_data = json.load(f)
+
+        df_cite = pd.read_csv(top_path).head(50)
+        # n-1 correction: subtract original submission paper
+        df_cite['citation_count'] = df_cite['accession'].map(
+            lambda a: max(cite_data.get(a, 1) - 1, 0))
+        df_cite['years_active'] = df_cite['last_download_year'] - df_cite['first_download_year'] + 1
+        max_years = 5
+        df_cite['consistency_score'] = df_cite['years_active'].clip(upper=max_years) / max_years
+
+        df_cited = df_cite[df_cite['citation_count'] > 0].copy()
+        df_uncited = df_cite[df_cite['citation_count'] == 0].copy()
+
+        sc = ax3.scatter(
+            df_cited['citation_count'], df_cited['total_downloads'],
+            c=df_cited['consistency_score'], cmap='RdYlGn',
+            s=50, alpha=0.7, edgecolors='#333333', linewidths=0.5,
+            vmin=0, vmax=1, zorder=3)
+
+        if len(df_uncited) > 0:
+            ax3.scatter(
+                [0.8] * len(df_uncited), df_uncited['total_downloads'],
+                c='#cccccc', s=30, alpha=0.4, edgecolors='#999999',
+                linewidths=0.3, zorder=2)
+
+        if len(df_cited) > 5:
+            rho, p_val = sp_stats.spearmanr(df_cited['citation_count'], df_cited['total_downloads'])
+            log_x = np.log10(df_cited['citation_count'].values)
+            log_y = np.log10(df_cited['total_downloads'].values)
+            slope, intercept, _, _, _ = sp_stats.linregress(log_x, log_y)
+            x_fit = np.linspace(log_x.min(), log_x.max(), 100)
+            ax3.plot(10**x_fit, 10**(slope * x_fit + intercept), 'r--', alpha=0.6, linewidth=1.5, zorder=4)
+            ax3.text(0.05, 0.95, f'Spearman $\\rho$ = {rho:.3f}\np = {p_val:.2e}\nn = {len(df_cited)}',
+                     transform=ax3.transAxes, fontsize=9, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+        for _, row in df_cited.nlargest(5, 'total_downloads').iterrows():
+            ax3.annotate(row['accession'], (row['citation_count'], row['total_downloads']),
+                         fontsize=6.5, alpha=0.8, xytext=(5, 5), textcoords='offset points')
+
+        ax3.set_xscale('log')
+        ax3.set_yscale('log')
+        ax3.set_xlabel('EuropePMC Reuse Citation Count')
+        ax3.set_ylabel('Total Downloads (bot-filtered)')
+        cb = plt.colorbar(sc, ax=ax3, shrink=0.8, pad=0.02)
+        cb.set_label('Download Consistency\n(years active / 5)', fontsize=9)
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
+        ax3.grid(True, alpha=0.3, which='both')
+        ax3.set_title('(C) Reuse Citations vs Downloads', fontsize=11, fontweight='bold', loc='left')
+    else:
+        ax3.text(0.5, 0.5, 'Citation data not available', ha='center', va='center', transform=ax3.transAxes)
+        ax3.set_title('(C) Reuse Citations vs Downloads', fontsize=11, fontweight='bold', loc='left')
 
     plt.savefig(output_dir / 'figure5_dataset_concentration.pdf', format='pdf', bbox_inches='tight')
     plt.close()

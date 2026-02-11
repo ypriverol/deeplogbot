@@ -8,7 +8,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from logghostbuster.models.unsupervised.advanced_discovery import (
+from deeplogbot.models.unsupervised.advanced_discovery import (
     classify_location_heuristic,
     classify_cluster_profile,
     classify_with_ensemble,

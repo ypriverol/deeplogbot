@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, '.')
 
 import pandas as pd
-from logghostbuster.models.unsupervised.advanced_discovery import (
+from deeplogbot.models.unsupervised.advanced_discovery import (
     classify_location_heuristic,
     compute_data_statistics,
     DataStatistics

@@ -179,9 +179,11 @@ Importantly, the most downloaded datasets are not one-time events but show susta
 \begin{figure}[H]
 \centering
 \includegraphics[width=\textwidth]{figures/figure5_dataset_concentration.pdf}
-\caption{Dataset reuse concentration and consistency. (A) Rank-frequency distribution on log-log scale; the dashed red line marks the top 1\% boundary, beyond which download counts drop sharply (Gini = 0.84). (B) Download consistency heatmap for the top 25 most downloaded datasets (2021--2025, after bot removal); color intensity represents download count on a log$_{10}$ scale. Most top datasets show sustained reuse across 4--5 years, indicating their role as community reference and benchmark datasets.}
+\caption{Dataset reuse concentration and consistency. (A) Rank-frequency distribution on log-log scale; the dashed red line marks the top 1\% boundary, beyond which download counts drop sharply (Gini = 0.84). (B) Download consistency heatmap for the top 25 most downloaded datasets (2021--2025, after bot removal); color intensity represents download count on a log$_{10}$ scale. Most top datasets show sustained reuse across 4--5 years, indicating their role as community reference and benchmark datasets. (C) Relationship between EuropePMC reuse citations and download volume for the top 50 most downloaded datasets (n$-$1 correction to exclude the original submission); point color indicates download consistency (fraction of years active out of five), grey points represent datasets with no independent reuse citations.}
 \label{fig:concentration}
 \end{figure}
+
+To assess whether download popularity reflects broader scientific impact, we queried EuropePMC for reuse citations of each dataset accession among the top 50 most downloaded datasets, subtracting the original submission publication to count only independent reuse mentions (Figure~\ref{fig:concentration}C). Of these, 37 datasets (74\%) have been cited in at least one independent publication beyond their original submission, with a median of 2 reuse citations and a maximum of 52 (PXD000561). While the correlation between download volume and reuse citation count shows a positive trend, it does not reach statistical significance (Spearman $\rho$ = 0.206, $p$ = 0.22), suggesting that high download counts do not simply mirror publication visibility. This indicates that sustained, multi-year download activity---rather than raw download volume alone---is the stronger signal of genuine community adoption and complements publication-based impact metrics.
 
 \subsection{Download Hubs}
 

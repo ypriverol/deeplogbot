@@ -27,8 +27,8 @@ import numpy as np
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from logghostbuster.main import run_bot_annotator
-from logghostbuster.utils import logger
+from deeplogbot.main import run_bot_annotator
+from deeplogbot.utils import logger
 
 
 def classify_dataset(

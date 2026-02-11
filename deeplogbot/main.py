@@ -241,7 +241,7 @@ def run_bot_annotator(
         # Extract advanced behavioral features for deep method
         if classification_method.lower() == 'deep':
             logger.info("\nExtracting advanced behavioral features (burst patterns, circadian rhythms, user coordination)...")
-            from logghostbuster.features.providers.ebi import (
+            from deeplogbot.features.providers.ebi import (
                 extract_advanced_behavioral_features,
                 add_bot_signature_features,
                 add_bot_interaction_features
@@ -260,7 +260,7 @@ def run_bot_annotator(
             
             # Extract discriminative features (NEW - Two-Stage Classification)
             logger.info("\nExtracting discriminative features (malicious vs legitimate automation)...")
-            from logghostbuster.features.providers.ebi import extract_discriminative_features
+            from deeplogbot.features.providers.ebi import extract_discriminative_features
             try:
                 analysis_df = extract_discriminative_features(
                     analysis_df,
@@ -296,7 +296,7 @@ def run_bot_annotator(
         # Add bot interaction and signature features now that anomaly_score is available
         if classification_method.lower() == 'deep':
             try:
-                from logghostbuster.features.providers.ebi import (
+                from deeplogbot.features.providers.ebi import (
                     add_bot_interaction_features,
                     add_bot_signature_features
                 )
@@ -369,7 +369,7 @@ def run_bot_annotator(
             logger.info("Step 4: Feature Usage Validation")
             logger.info("=" * 70)
             try:
-                from logghostbuster.models.classification.feature_validation import validate_feature_usage
+                from deeplogbot.models.classification.feature_validation import validate_feature_usage
                 import json
                 
                 # Get predictions for validation

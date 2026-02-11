@@ -16,7 +16,7 @@ sys.path.insert(0, '.')
 import importlib.util
 spec = importlib.util.spec_from_file_location(
     'improved_clustering',
-    'logghostbuster/models/unsupervised/improved_clustering.py'
+    'deeplogbot/models/unsupervised/improved_clustering.py'
 )
 improved_clustering = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(improved_clustering)

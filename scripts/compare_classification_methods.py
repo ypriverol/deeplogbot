@@ -14,8 +14,8 @@ from pathlib import Path
 # Add the package to path (go up one level from scripts/ to project root)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from logghostbuster.main import run_bot_annotator
-from logghostbuster.utils import logger
+from deeplogbot.main import run_bot_annotator
+from deeplogbot.utils import logger
 
 
 def compare_methods(input_parquet, sample_size=None, base_output_dir='output/comparison'):

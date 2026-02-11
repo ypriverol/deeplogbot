@@ -24,7 +24,7 @@ warnings.filterwarnings('ignore')
 
 def benchmark_method(method_name, sample_file, output_dir, **kwargs):
     """Run a single method and return results."""
-    from logghostbuster import run_bot_annotator
+    from deeplogbot import run_bot_annotator
 
     method_output = os.path.join(output_dir, method_name)
     os.makedirs(method_output, exist_ok=True)
@@ -135,7 +135,7 @@ def main():
     args = parser.parse_args()
 
     print(f"{'='*60}", flush=True)
-    print("LOGGHOSTBUSTER CLASSIFICATION BENCHMARK", flush=True)
+    print("DEEPLOGBOT CLASSIFICATION BENCHMARK", flush=True)
     print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
     print(f"{'='*60}", flush=True)
 

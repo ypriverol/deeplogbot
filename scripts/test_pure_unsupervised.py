@@ -10,7 +10,7 @@ sys.path.insert(0, '.')
 import importlib.util
 spec = importlib.util.spec_from_file_location(
     'pure_unsupervised',
-    'logghostbuster/models/unsupervised/pure_unsupervised.py'
+    'deeplogbot/models/unsupervised/pure_unsupervised.py'
 )
 pure_unsupervised = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pure_unsupervised)

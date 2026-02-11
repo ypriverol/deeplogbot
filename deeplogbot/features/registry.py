@@ -8,7 +8,7 @@ This module provides a single source of truth for all features used in bot detec
 - Feature dependencies
 
 Usage:
-    from logghostbuster.features.registry import FeatureRegistry, FeatureCategory
+    from deeplogbot.features.registry import FeatureRegistry, FeatureCategory
 
     # Get all features
     all_features = FeatureRegistry.get_enabled()
@@ -1586,7 +1586,7 @@ def print_feature_summary() -> None:
     """Print summary of all registered features."""
     summary = FeatureRegistry.summary()
     print(f"\n{'='*60}")
-    print("LOGGHOSTBUSTER FEATURE REGISTRY SUMMARY")
+    print("DEEPLOGBOT FEATURE REGISTRY SUMMARY")
     print(f"{'='*60}")
     print(f"Total Features: {summary['total']}")
     print(f"Enabled Features: {summary['enabled']}")

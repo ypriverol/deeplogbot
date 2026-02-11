@@ -10,7 +10,7 @@ with its own:
 - Taxonomy: Category definitions and subcategories
 
 Usage:
-    from logghostbuster.providers import get_provider, list_providers, register_provider
+    from deeplogbot.providers import get_provider, list_providers, register_provider
 
     # Get a specific provider
     provider = get_provider('ebi')
@@ -225,8 +225,8 @@ def _auto_discover_providers() -> None:
                         name=name,
                         display_name=display_name,
                         config_path=config_path,
-                        schema_module=f"logghostbuster.features.providers.{name}",
-                        extractor_module=f"logghostbuster.features.providers.{name}",
+                        schema_module=f"deeplogbot.features.providers.{name}",
+                        extractor_module=f"deeplogbot.features.providers.{name}",
                     )
                     register_provider(name, provider)
                 except Exception as e:

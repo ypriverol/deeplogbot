@@ -9,15 +9,15 @@ Provider System:
     defines its own schema, feature extractors, and classification rules.
 
     Available providers can be listed with:
-        from logghostbuster import list_available_providers
+        from deeplogbot import list_available_providers
         print(list_available_providers())
 
     Set the active provider with:
-        from logghostbuster import set_active_provider
+        from deeplogbot import set_active_provider
         set_active_provider('ebi')  # or 'custom', etc.
 
 Example:
-    from logghostbuster import run_bot_annotator
+    from deeplogbot import run_bot_annotator
 
     # Run with EBI provider (default)
     results = run_bot_annotator(

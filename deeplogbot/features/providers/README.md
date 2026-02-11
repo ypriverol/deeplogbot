@@ -106,7 +106,7 @@ Aggregates location-level statistics to country level for detecting coordinated 
 ## Usage
 
 ```python
-from logghostbuster.features.providers.ebi import extract_location_features_ebi
+from deeplogbot.features.providers.ebi import extract_location_features_ebi
 import duckdb
 
 conn = duckdb.connect()

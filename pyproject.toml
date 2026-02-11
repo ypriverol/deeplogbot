@@ -39,9 +39,9 @@ llm = [
 ]
 
 [project.scripts]
-deeplogbot = "logghostbuster.main:main"
+deeplogbot = "deeplogbot.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["logghostbuster*"]
+include = ["deeplogbot*"]
 

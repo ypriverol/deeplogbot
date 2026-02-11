@@ -7,7 +7,7 @@ This module handles:
 - Classification rule accessors
 
 Usage:
-    from logghostbuster.config import get_provider_config, set_active_provider
+    from deeplogbot.config import get_provider_config, set_active_provider
 
     # Use default provider (EBI)
     config = get_provider_config()

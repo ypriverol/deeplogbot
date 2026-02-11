@@ -28,7 +28,7 @@ import numpy as np
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from logghostbuster.utils import logger
+from deeplogbot.utils import logger
 
 
 def load_method_results(benchmark_dir: str, methods: list) -> dict:

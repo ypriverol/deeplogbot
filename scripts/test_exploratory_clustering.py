@@ -199,7 +199,7 @@ def test_exploratory_clustering():
 
     try:
         # Direct import from module
-        from logghostbuster.models.unsupervised.exploratory_clustering import (
+        from deeplogbot.models.unsupervised.exploratory_clustering import (
             ExploratoryConfig,
             run_exploratory_clustering,
         )

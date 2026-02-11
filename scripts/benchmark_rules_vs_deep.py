@@ -95,7 +95,7 @@ def create_sample(input_parquet: str, sample_size: int, output_dir: str) -> str:
 
 def run_method(method: str, sample_file: str, output_dir: str) -> dict:
     """Run a classification method and return metrics."""
-    from logghostbuster import run_bot_annotator
+    from deeplogbot import run_bot_annotator
 
     method_dir = os.path.join(output_dir, method)
     os.makedirs(method_dir, exist_ok=True)
@@ -224,7 +224,7 @@ def main():
     args = parser.parse_args()
 
     print(f"{'=' * 70}")
-    print(f"LOGGHOSTBUSTER: Rules vs Deep Benchmark")
+    print(f"DEEPLOGBOT: Rules vs Deep Benchmark")
     print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Sample size: {args.sample_size:,} records")
     print(f"{'=' * 70}")
