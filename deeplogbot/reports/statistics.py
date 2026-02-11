@@ -8,13 +8,10 @@ This module computes comprehensive statistics including:
 - Feature importance analysis
 """
 
-from typing import Dict, Any, List, Optional, Tuple
-from collections import defaultdict
+from typing import Dict, Any, List
 
 import pandas as pd
 import numpy as np
-
-from ..utils import logger
 
 
 class StatisticsCalculator:
@@ -66,7 +63,7 @@ class StatisticsCalculator:
                 ) if self.df['total_downloads'].sum() > 0 else 0
 
         # Hub statistics (using hierarchical classification)
-        hub_subcategories = {'mirror', 'institutional_hub', 'data_aggregator'}
+        hub_subcategories = {'mirror', 'ci_cd_pipeline', 'course_workshop'}
         if 'subcategory' in self.df.columns:
             hub_mask = self.df['subcategory'].isin(hub_subcategories)
             stats['hub_locations'] = int(hub_mask.sum())

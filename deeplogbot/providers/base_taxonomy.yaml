@@ -112,7 +112,7 @@ automation_category:
         downloads_per_user:
           max: 50    # Override based on data scale
 
-      - id: coordinated_bot_activity
+      - id: coordinated_activity
         description: "Highly coordinated suspicious activity"
         user_coordination_score:
           min: 0.7
@@ -150,7 +150,7 @@ automation_category:
         unique_users:
           max: 100   # Override based on data scale
 
-      - id: institutional_hub_pattern
+      - id: high_volume_institution
         description: "Research institution hub - high volume with working hours activity"
         total_downloads:
           min: 100000  # Override based on data scale
@@ -206,44 +206,7 @@ subcategories:
     downloads_per_user:
       max: 100
 
-  casual_bulk:
-    parent: organic
-    description: "Individual heavy downloaders with human patterns"
-    unique_users:
-      max: 10
-    downloads_per_user:
-      min: 30
-      max: 300
-    working_hours_ratio:
-      min: 0.3
-
   # ---- BOT subcategories ----
-  scraper_bot:
-    parent: bot
-    description: "High-frequency automated scrapers"
-    unique_users:
-      min: 5000
-    downloads_per_user:
-      max: 20
-
-  crawler_bot:
-    parent: bot
-    description: "Systematic crawlers exploring the catalog"
-    unique_users:
-      min: 1000
-      max: 5000
-    downloads_per_user:
-      min: 20
-      max: 100
-
-  coordinated_bot:
-    parent: bot
-    description: "Bot farms with coordinated activity"
-    user_coordination_score:
-      min: 0.7
-    unique_users:
-      min: 500
-
   generic_bot:
     parent: bot
     description: "Bot that doesn't match specific subcategories"
@@ -257,17 +220,6 @@ subcategories:
       min: 500
     unique_users:
       max: 100
-
-  institutional_hub:
-    parent: legitimate_automation
-    description: "Research infrastructure hubs"
-    total_downloads:
-      min: 50000
-    downloads_per_user:
-      min: 50
-      max: 500
-    working_hours_ratio:
-      min: 0.25
 
   ci_cd_pipeline:
     parent: legitimate_automation
@@ -288,14 +240,6 @@ subcategories:
       max: 30
     working_hours_ratio:
       min: 0.4
-
-  data_aggregator:
-    parent: legitimate_automation
-    description: "Legitimate data aggregation services"
-    downloads_per_user:
-      min: 100
-    unique_users:
-      max: 50
 
 # =============================================================================
 # FEATURE REQUIREMENTS
@@ -334,5 +278,5 @@ derived_columns:
     description: "True if subcategory in hub types"
     hub_subcategories:
       - mirror
-      - institutional_hub
-      - data_aggregator
+      - ci_cd_pipeline
+      - course_workshop

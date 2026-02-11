@@ -14,7 +14,7 @@ aggregate-level temporal metrics useful for both ML and deep learning models.
 
 import pandas as pd
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional
 from scipy import stats
 from scipy.fft import rfft, rfftfreq
 from ....utils import logger

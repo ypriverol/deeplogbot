@@ -18,21 +18,16 @@ Applied to the PRIDE Archive (159M download records), the system identified that
 behavior_type (Level 1)
 ├── ORGANIC
 │   ├── individual_user
-│   ├── research_group
-│   └── casual_bulk
+│   └── research_group
 │
 └── AUTOMATED
     ├── BOT
-    │   ├── scraper_bot
-    │   ├── crawler_bot
-    │   └── coordinated_bot
+    │   └── generic_bot
     │
     └── LEGITIMATE_AUTOMATION (Hub)
         ├── mirror
-        ├── institutional_hub
         ├── ci_cd_pipeline
-        ├── data_pipeline
-        └── data_aggregator
+        └── course_workshop
 ```
 
 ## Classification Methods
@@ -280,7 +275,7 @@ The annotated output parquet contains:
 | `is_organic` | Organic user classification flag |
 | `behavior_type` | `organic` or `automated` |
 | `automation_category` | `bot` or `legitimate_automation` |
-| `subcategory` | Detailed category (e.g., `mirror`, `scraper_bot`) |
+| `subcategory` | Detailed category (e.g., `mirror`, `generic_bot`) |
 | `classification_confidence` | Confidence score (0-1) |
 
 Reports generated:

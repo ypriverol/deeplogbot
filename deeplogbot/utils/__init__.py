@@ -1,6 +1,7 @@
 """Utility functions package."""
 
 import logging
+import os
 import sys
 import warnings
 
@@ -8,7 +9,6 @@ warnings.filterwarnings('ignore')
 
 # Configure logging with immediate flushing
 # Use DEBUG level by default, or override with environment variable LOG_LEVEL
-import os
 log_level = os.getenv('LOG_LEVEL', 'DEBUG').upper()
 log_level = getattr(logging, log_level, logging.DEBUG)
 
@@ -42,7 +42,7 @@ def format_number(num):
 
 
 # Geographic utilities
-from .geography import haversine_distance, parse_geo_location, group_nearby_locations
+from .geography import haversine_distance, parse_geo_location, group_nearby_locations  # noqa: E402
 
 __all__ = [
     "logger",

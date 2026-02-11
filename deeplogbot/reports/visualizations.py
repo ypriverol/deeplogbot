@@ -9,7 +9,7 @@ This module provides plotting functions for:
 """
 
 import os
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 import pandas as pd
@@ -40,7 +40,6 @@ CATEGORY_COLORS = {
     'bot': '#e74c3c',           # Red
     'download_hub': '#3498db',   # Blue
     'mirror': '#2980b9',         # Dark blue
-    'institutional_hub': '#1abc9c',  # Teal
     'ci_cd_pipeline': '#9b59b6',     # Purple
     'individual_user': '#27ae60',    # Green
     'research_group': '#f39c12',     # Orange
@@ -62,7 +61,7 @@ AUTOMATION_CATEGORY_COLORS = {
 }
 
 # Hub subcategories for classification
-HUB_SUBCATEGORIES = {'mirror', 'institutional_hub', 'data_aggregator'}
+HUB_SUBCATEGORIES = {'mirror', 'ci_cd_pipeline', 'course_workshop'}
 
 
 def get_classification_masks(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
@@ -368,7 +367,7 @@ class VisualizationGenerator:
         fig, ax = plt.subplots(figsize=(10, max(6, len(features) * 0.4)))
 
         colors = ['#e74c3c' if v < 0 else '#27ae60' for v in importance]
-        bars = ax.barh(range(len(features)), importance, color=colors)
+        ax.barh(range(len(features)), importance, color=colors)
         ax.set_yticks(range(len(features)))
         ax.set_yticklabels([f.replace('_', ' ').title() for f in features])
         ax.set_xlabel('Importance Score')

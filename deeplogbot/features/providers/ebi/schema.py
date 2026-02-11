@@ -35,5 +35,5 @@ class LogEbiSchema(LogSchema):
 EBI_SCHEMA = LogEbiSchema()
 
 # Register in the global schema registry
-from ...schema import register_schema
+from ...schema import register_schema  # noqa: E402
 register_schema("ebi", EBI_SCHEMA)

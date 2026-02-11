@@ -24,9 +24,8 @@ Usage:
     register_provider('my_provider', MyProviderClass)
 """
 
-import os
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Type
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
 import yaml

@@ -161,7 +161,7 @@ def create_ground_truth_labels(df: pd.DataFrame) -> pd.DataFrame:
     mask_inst_hub = (~bot_mask) & (~mask_mirror) & (users <= 20) & (dpu >= 500)
     labels[mask_inst_hub] = 'hub'
     confidence[mask_inst_hub] = 0.90
-    criteria[mask_inst_hub] = 'institutional_hub: users<=20, dpu>=500'
+    criteria[mask_inst_hub] = 'hub: users<=20, dpu>=500'
 
     # Research infrastructure: moderate users, very high total, regular hours
     mask_research_hub = (~bot_mask) & (~mask_mirror) & (~mask_inst_hub) & \
@@ -261,7 +261,7 @@ def save_ground_truth(df: pd.DataFrame, output_dir: str):
             ],
             'hub': [
                 'mirror: users<=5, dpu>=1000 (conf=0.95)',
-                'institutional_hub: users<=20, dpu>=500 (conf=0.90)',
+                'hub: users<=20, dpu>=500 (conf=0.90)',
                 'research_hub: 10<=users<=200, dpu>=200, total>=100K (conf=0.85)',
             ],
             'organic': [

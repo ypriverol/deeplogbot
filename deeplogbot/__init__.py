@@ -46,7 +46,7 @@ from .features import (
     TimeOfDayExtractor,
     CountryLevelExtractor,
 )
-from .reports import generate_report, ReportGenerator, annotate_downloads
+from .reports import generate_report, annotate_downloads
 from .features import LogSchema, EBI_SCHEMA, get_schema, register_schema, SCHEMA_REGISTRY
 
 # Provider management
