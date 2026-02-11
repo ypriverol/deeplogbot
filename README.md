@@ -1,5 +1,11 @@
 # DeepLogBot
 
+[![PyPI version](https://img.shields.io/pypi/v/deeplogbot)](https://pypi.org/project/deeplogbot/)
+[![Python](https://img.shields.io/pypi/pyversions/deeplogbot)](https://pypi.org/project/deeplogbot/)
+[![Tests](https://github.com/ypriverol/deeplogbot/actions/workflows/tests.yml/badge.svg)](https://github.com/ypriverol/deeplogbot/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![llms.txt](https://img.shields.io/badge/llms.txt-available-blue)](https://github.com/ypriverol/deeplogbot/blob/main/llms.txt)
+
 Bot detection and traffic classification for scientific data repository logs.
 
 ## Overview
