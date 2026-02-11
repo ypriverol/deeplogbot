@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from ..config import HUB_SUBCATEGORIES
 from ..utils import logger
 
 
@@ -434,12 +435,11 @@ class HTMLReportGenerator:
                                       top_n: int = 20) -> str:
         """Generate table of top locations for a category."""
         # Use hierarchical classification columns
-        hub_subcategories = {'mirror', 'ci_cd_pipeline', 'course_workshop'}
         if category == 'bot' and 'automation_category' in df.columns:
             subset = df[df['automation_category'] == 'bot'].sort_values('unique_users', ascending=False).head(top_n)
             badge_class = 'badge-bot'
         elif category == 'hub' and 'subcategory' in df.columns:
-            subset = df[df['subcategory'].isin(hub_subcategories)].sort_values('downloads_per_user', ascending=False).head(top_n)
+            subset = df[df['subcategory'].isin(HUB_SUBCATEGORIES)].sort_values('downloads_per_user', ascending=False).head(top_n)
             badge_class = 'badge-hub'
         else:
             return ""

@@ -618,6 +618,10 @@ def get_subcategories_by_parent(parent: str) -> dict:
     }
 
 
+# Canonical set of hub subcategories — import this instead of hardcoding
+HUB_SUBCATEGORIES = frozenset({'mirror', 'ci_cd_pipeline', 'course_workshop'})
+
+
 def get_hierarchical_classification_config() -> dict:
     """
     Get the complete hierarchical classification configuration.
