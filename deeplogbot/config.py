@@ -373,11 +373,6 @@ def get_category_rules() -> dict:
             'min_working_hours_ratio': 0.5,
             'min_file_diversity_ratio': 0.3,
         },
-        'bulk_downloader': {
-            'max_users': 5,
-            'min_downloads_per_user': 100,
-            'max_downloads_per_user': 1000,
-        },
         'course_workshop': {
             'min_users': 50,
             'max_users': 500,
@@ -563,11 +558,9 @@ def get_subcategory_rules(use_provider: bool = True) -> dict:
             'description': 'Institutional mirrors',
             'downloads_per_user': {'min': 500}
         },
-        'scraper_bot': {
+        'generic_bot': {
             'parent': 'bot',
-            'description': 'High-frequency automated scrapers',
-            'unique_users': {'min': 5000},
-            'downloads_per_user': {'max': 25}
+            'description': 'Bot that doesn\'t match specific subcategories',
         }
     }
 

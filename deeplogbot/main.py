@@ -420,7 +420,7 @@ def run_bot_annotator(
         else:
             bot_locs = pd.DataFrame()
         
-        hub_subcategories = {'mirror', 'institutional_hub', 'data_aggregator'}
+        hub_subcategories = {'mirror', 'ci_cd_pipeline', 'course_workshop'}
         if 'subcategory' in analysis_df.columns:
             hub_locs = analysis_df[analysis_df['subcategory'].isin(hub_subcategories)].copy()
         elif 'is_download_hub' in analysis_df.columns:
@@ -539,7 +539,7 @@ def run_bot_annotator(
             else:
                 bot_mask = pd.Series(False, index=analysis_df.index)
             
-            hub_subcategories = {'mirror', 'institutional_hub', 'data_aggregator'}
+            hub_subcategories = {'mirror', 'ci_cd_pipeline', 'course_workshop'}
             if 'subcategory' in analysis_df.columns:
                 hub_mask = analysis_df['subcategory'].isin(hub_subcategories)
             elif 'is_download_hub' in analysis_df.columns:

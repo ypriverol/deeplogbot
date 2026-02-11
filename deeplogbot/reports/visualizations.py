@@ -40,7 +40,6 @@ CATEGORY_COLORS = {
     'bot': '#e74c3c',           # Red
     'download_hub': '#3498db',   # Blue
     'mirror': '#2980b9',         # Dark blue
-    'institutional_hub': '#1abc9c',  # Teal
     'ci_cd_pipeline': '#9b59b6',     # Purple
     'individual_user': '#27ae60',    # Green
     'research_group': '#f39c12',     # Orange
@@ -62,7 +61,7 @@ AUTOMATION_CATEGORY_COLORS = {
 }
 
 # Hub subcategories for classification
-HUB_SUBCATEGORIES = {'mirror', 'institutional_hub', 'data_aggregator'}
+HUB_SUBCATEGORIES = {'mirror', 'ci_cd_pipeline', 'course_workshop'}
 
 
 def get_classification_masks(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
