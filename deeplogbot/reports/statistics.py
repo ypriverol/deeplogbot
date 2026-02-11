@@ -8,13 +8,10 @@ This module computes comprehensive statistics including:
 - Feature importance analysis
 """
 
-from typing import Dict, Any, List, Optional, Tuple
-from collections import defaultdict
+from typing import Dict, Any, List
 
 import pandas as pd
 import numpy as np
-
-from ..utils import logger
 
 
 class StatisticsCalculator:

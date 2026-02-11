@@ -190,7 +190,6 @@ def run_bot_annotator(
     # Apply DuckDB configuration from config.yaml
     duckdb_config = APP_CONFIG.get('duckdb', {})
     memory_limit = duckdb_config.get('memory_limit', '16GB')
-    max_temp_directory_size = duckdb_config.get('max_temp_directory_size', '20GiB')
     temp_directory_config = duckdb_config.get('temp_directory', './duckdb-tmp/')
     temp_directory_abs = os.path.abspath(temp_directory_config)
     os.makedirs(temp_directory_abs, exist_ok=True)
@@ -441,7 +440,7 @@ def run_bot_annotator(
 
             # Log detailed category counts
             category_counts = analysis_df['user_category'].value_counts()
-            logger.info(f"\nLocation Categories:")
+            logger.info("\nLocation Categories:")
             for cat, count in category_counts.items():
                 logger.info(f"  {cat}: {count:,} locations ({count/len(analysis_df)*100:.1f}%)")
         
@@ -641,7 +640,7 @@ def run_bot_annotator(
         logger.info("\n" + "=" * 70)
         logger.info("Bot Annotation Complete!")
         logger.info("=" * 70)
-        logger.info(f"\nOutput files:")
+        logger.info("\nOutput files:")
         if annotated_file:
             logger.info(f"  - {annotated_file} (annotated with 'bot' and 'download_hub' columns)")
         elif effective_annotate and output_strategy == 'reports_only':

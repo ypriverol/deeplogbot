@@ -1590,11 +1590,11 @@ def print_feature_summary() -> None:
     print(f"{'='*60}")
     print(f"Total Features: {summary['total']}")
     print(f"Enabled Features: {summary['enabled']}")
-    print(f"\nBy Category:")
+    print("\nBy Category:")
     for cat, count in summary['by_category'].items():
         if count > 0:
             print(f"  {cat}: {count}")
-    print(f"\nBy Computation Stage:")
+    print("\nBy Computation Stage:")
     for stage, count in summary['by_stage'].items():
         if count > 0:
             print(f"  {stage}: {count}")

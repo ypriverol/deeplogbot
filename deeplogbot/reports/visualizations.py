@@ -9,7 +9,7 @@ This module provides plotting functions for:
 """
 
 import os
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 import pandas as pd
@@ -368,7 +368,7 @@ class VisualizationGenerator:
         fig, ax = plt.subplots(figsize=(10, max(6, len(features) * 0.4)))
 
         colors = ['#e74c3c' if v < 0 else '#27ae60' for v in importance]
-        bars = ax.barh(range(len(features)), importance, color=colors)
+        ax.barh(range(len(features)), importance, color=colors)
         ax.set_yticks(range(len(features)))
         ax.set_yticklabels([f.replace('_', ' ').title() for f in features])
         ax.set_xlabel('Importance Score')

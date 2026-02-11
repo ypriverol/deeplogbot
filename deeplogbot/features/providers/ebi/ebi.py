@@ -15,7 +15,7 @@ from scipy import stats
 
 from ...base import BaseFeatureExtractor
 from ...schema import LogSchema
-from .schema import LogEbiSchema, EBI_SCHEMA
+from .schema import EBI_SCHEMA
 from ....utils import logger
 
 # Import new feature extraction functions
@@ -35,7 +35,6 @@ from .timeseries import (
     extract_trend_features,
     extract_recency_features,
     extract_distribution_shape_features,
-    extract_all_timeseries_features,
 )
 
 
