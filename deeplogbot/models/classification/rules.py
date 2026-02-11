@@ -33,9 +33,9 @@ if not RULES_CONFIG:
     RULES_FILE_PATH = os.path.join(os.path.dirname(CONFIG_FILE_PATH), "rules.yaml")
     try:
         RULES_CONFIG = load_config(RULES_FILE_PATH)
-        logger.info(f"Loaded rules from legacy rules.yaml file. Consider migrating to config.yaml")
+        logger.info("Loaded rules from legacy rules.yaml file. Consider migrating to config.yaml")
     except FileNotFoundError:
-        logger.warning(f"Rules configuration not found in config.yaml or rules.yaml")
+        logger.warning("Rules configuration not found in config.yaml or rules.yaml")
         RULES_CONFIG = {}
 
 

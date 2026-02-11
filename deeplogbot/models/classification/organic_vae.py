@@ -10,7 +10,6 @@ non-linear anomaly detection that captures feature interactions.
 
 import logging
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler

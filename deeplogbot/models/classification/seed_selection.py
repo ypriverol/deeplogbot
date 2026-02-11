@@ -10,7 +10,6 @@ classify production data.
 """
 
 import logging
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -32,7 +31,8 @@ def select_organic_seed(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame subset with added 'seed_confidence' column (0-1)
     """
-    has = lambda *cols: all(c in df.columns for c in cols)
+    def has(*cols):
+        return all(c in df.columns for c in cols)
 
     # ------------------------------------------------------------------
     # Tier A: Individual researchers -- very high confidence
@@ -110,7 +110,8 @@ def select_bot_seed(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame subset with added 'seed_confidence' column (0-1)
     """
-    has = lambda *cols: all(c in df.columns for c in cols)
+    def has(*cols):
+        return all(c in df.columns for c in cols)
 
     # Strong bot signal: many users with low DL/user (distributed bot farm)
     bot_farm = pd.Series(False, index=df.index)
@@ -157,7 +158,8 @@ def select_hub_seed(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame subset with added 'seed_confidence' column (0-1)
     """
-    has = lambda *cols: all(c in df.columns for c in cols)
+    def has(*cols):
+        return all(c in df.columns for c in cols)
 
     hub_mask = pd.Series(False, index=df.index)
     if has('downloads_per_user', 'unique_users'):

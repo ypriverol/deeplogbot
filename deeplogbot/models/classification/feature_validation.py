@@ -82,7 +82,7 @@ def validate_feature_usage(
         # String/object type (e.g., 'bot', 'normal')
         unique_vals = np.unique(predictions)
         if 'bot' in unique_vals or True in unique_vals:
-            y = np.array([1 if (val == 'bot' or val == True or val == 'True') else 0 for val in predictions])
+            y = np.array([1 if (val == 'bot' or val is True or val == 'True') else 0 for val in predictions])
         else:
             # Convert to binary: use first value as negative class
             y = (predictions != unique_vals[0]).astype(int)
@@ -167,21 +167,21 @@ def validate_feature_usage(
     logger.info(f"{'='*70}")
     logger.info(f"Behavioral features: {behavioral_weight:.3f} ({behavioral_pct:.1f}%)")
     logger.info(f"Rule-based features: {rule_based_weight:.3f} ({100-behavioral_pct:.1f}%)")
-    logger.info(f"Target: ≥70% behavioral")
+    logger.info("Target: ≥70% behavioral")
     logger.info(f"Status: {'✓ PASS' if validation['passes_70_percent_threshold'] else '✗ FAIL'}")
     
-    logger.info(f"\nTop 10 Features:")
+    logger.info("\nTop 10 Features:")
     for i, feat in enumerate(validation['top_10_features'], 1):
         feat_type = "🎯 Behavioral" if feat['feature'] in behavioral_features else "📊 Rule-based"
         logger.info(f"  {i}. {feat['feature']:<30} {feat['importance']:.4f} {feat_type}")
     
     if validation['top_5_behavioral']:
-        logger.info(f"\nTop 5 Behavioral Features:")
+        logger.info("\nTop 5 Behavioral Features:")
         for i, feat in enumerate(validation['top_5_behavioral'], 1):
             logger.info(f"  {i}. {feat['feature']:<30} {feat['importance']:.4f}")
     
     if validation['top_5_rule_based']:
-        logger.info(f"\nTop 5 Rule-based Features:")
+        logger.info("\nTop 5 Rule-based Features:")
         for i, feat in enumerate(validation['top_5_rule_based'], 1):
             logger.info(f"  {i}. {feat['feature']:<30} {feat['importance']:.4f}")
     

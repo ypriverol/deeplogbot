@@ -5,14 +5,13 @@ These are rule-based refinements applied *after* the learned pipeline
 produces initial labels.
 """
 
-import logging
 import numpy as np
 import pandas as pd
 
 from ...utils import logger
 from ...config import get_hub_protection_rules
 
-from .fusion import LABEL_ORGANIC, LABEL_BOT, LABEL_HUB, LABEL_NAMES
+from .fusion import LABEL_NAMES
 
 
 # ---------------------------------------------------------------------------
