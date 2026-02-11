@@ -220,3 +220,43 @@ docs/2407.05639v2.pdf
 # Cursor context files
 cursor_context/
 .DS_Store
+docs/
+output/
+paper/*.out
+paper/*.log
+paper/*.aux
+paper/*.blg
+paper/*.bbl
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.fls
+config/llm_configs/gemini_service_account.json
+models/
+checkpoints/
+pride_data/
+
+# Paper artifacts (non-manuscript)
+paper/*.docx
+paper/*.pptx
+paper/~$*
+paper/Picture*.png
+paper/example-dataset.png
+paper/supplementary.toc
+ROADMAP.md
+config/
+examples/
+
+# Unreferenced figures
+paper/figures/pptx_images/
+paper/figures/figure_dataset_consistency.pdf
+paper/figures/figure3_algorithm_comparison.pdf
+paper/figures/supp_experiment_instrument.png
+
+# Duplicate PNG versions of generated PDF figures
+paper/figures/supp_downloads_per_file.png
+paper/figures/supp_consistency_heatmap.png
+paper/figures/supp_consistency_scores.png
+paper/figures/supp_european_trends.png
+paper/figures/supp_bubble_chart.png
+paper/figures/supp_protocol_overall.png
+paper/figures/supp_pridepy_downloads.png

@@ -1,0 +1,251 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage[hyphens]{url}
+\usepackage{hyperref}
+\expandafter\def\expandafter\UrlBreaks\expandafter{\UrlBreaks\do\/\do-\do_}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,fit,backgrounds}
+\usepackage[margin=1in]{geometry}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Custom colors
+\definecolor{botred}{RGB}{231,76,60}
+\definecolor{hubblue}{RGB}{52,152,219}
+\definecolor{organicgreen}{RGB}{46,204,113}
+\definecolor{automatedorange}{RGB}{230,126,34}
+
+% Title
+\title{\textbf{Tracking Dataset Reuse in Proteomics: A Comprehensive Analysis of PRIDE Archive Downloads}}
+
+\author{
+    Suresh Hewapathirana$^{1}$, Jingwen Bai$^{1}$, Chakradhar Bandla$^{1}$,\\
+    Selvakumar Kamatchinathan$^{1}$, Deepti J Kundu$^{1}$, Nithu Sara John$^{1}$,\\
+    Marc Riera Duocastella$^{1}$, Juan Antonio Vizca\'{i}no$^{1}$, Yasset Perez-Riverol$^{1,*}$\\[0.5em]
+    \small $^{1}$European Molecular Biology Laboratory, European Bioinformatics Institute (EMBL-EBI),\\
+    \small Wellcome Trust Genome Campus, Hinxton, Cambridge CB10 1SD, UK\\
+    \small $^{*}$Corresponding author: yperez@ebi.ac.uk
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% Abstract
+\begin{abstract}
+Understanding how scientific datasets are accessed and reused is essential for resource planning, impact assessment, and the evaluation of open science policies. Here we present the PRIDE Archive download tracking infrastructure and a comprehensive analysis of download records from the PRIDE proteomics database (2020-2025), spanning 34,085 datasets accessed from 213 countries. The infrastructure includes \texttt{nf-downloadstats}, a scalable Nextflow pipeline for processing large-scale download logs, and DeepLogBot, a deep-learning bot detection framework. After removing 88.0\% of download traffic identified as automated, analysis of the remaining 19.1 million genuine downloads reveals that the United States leads PRIDE data reuse (26.8\%), followed by the United Kingdom (23.6\%) and Germany (22.5\%). Downloads grew steadily from 1.2 million in 2021 to 5.8 million in 2025, with FTP and HTTP alternating as the dominant download protocol. Dataset reuse follows a highly concentrated distribution, with the top 1\% of datasets accounting for 43.3\% of all downloads. These findings provide actionable insights for repository infrastructure planning and demonstrate the importance of bot-aware analytics for scientific data resources.
+
+\begin{sloppypar}
+\noindent\textbf{Availability:} The \texttt{nf-downloadstats} pipeline is available at \url{https://github.com/PRIDE-Archive/nf-downloadstats} and DeepLogBot at \url{https://github.com/ypriverol/deeplogbot}, both under the Apache 2.0 license.
+\end{sloppypar}
+
+\noindent\textbf{Keywords:} bot detection, data reuse, download analytics, PRIDE, proteomics
+\end{abstract}
+
+\paragraph{Significance of the Study}
+Accurate download statistics are essential for assessing the impact of open scientific data, guiding infrastructure investments, and informing funding decisions. However, automated bot traffic---which we show accounts for 88.0\% of PRIDE download volume---severely distorts these metrics. This work provides the first large-scale, bot-aware analysis of proteomics data reuse, revealing genuine global usage patterns across 213 countries and 34,085 datasets over five years. The open-source tools we present (\texttt{nf-downloadstats} and DeepLogBot) are directly applicable to other scientific repositories facing similar challenges, enabling reliable usage analytics that support evidence-based resource planning and open science policy evaluation.
+
+% ======================================================================
+\section{Introduction}
+% ======================================================================
+
+The PRIDE (Proteomics Identifications) database is a leading public mass spectrometry-based proteomics data repository \citep{PerezRiverol2025}. As a founding member of the ProteomeXchange consortium, PRIDE enables researchers to share and access high-quality proteomics datasets globally, promoting transparency, reproducibility, and data reuse. Aligned with the FAIR principles---Findable, Accessible, Interoperable, and Reusable \citep{Wilkinson2016} - PRIDE supports open science by ensuring that public datasets are well-annotated and machine-readable. These principles are essential for maximizing the value of shared scientific data.
+
+Understanding how public datasets are reused is essential for assessing their scientific impact and informing data-driven policies. While citations in scholarly publications offer one indicator of reuse, download statistics provide a more immediate and granular view of data demand and utility. In our previous work, we demonstrated that usage metrics can serve as complementary indicators of impact, supporting improved data stewardship, resource allocation, and funding decisions \citep{PerezRiverol2019}. Beyond measuring impact, download statistics are critical for designing more effective data infrastructures. Insights into download behavior can inform the optimization of data access protocols, guide the prioritization of metadata curation and visualization features, and identify high-value datasets for targeted annotation or integration efforts \citep{Perez-Riverol2022}. As public data volumes continue to grow, usage-driven strategies become increasingly important for improving dataset discoverability and reuse. For example, frequently downloaded datasets---particularly those used as community benchmarks---could be prioritized for enhanced metadata annotation (e.g., SDRF sample descriptions \citep{Dai2021}) and enriched with curated tags and keywords, making them easier to find through search interfaces. Users could then combine these annotations with download counts to identify the most relevant and community-validated datasets for their analyses. Similarly, repositories can leverage download patterns to allocate faster transfer services and optimized storage for high-demand datasets, ensuring that the most reused data remain readily accessible.
+
+Despite their importance, systematic tracking of dataset downloads remains a major challenge across PRIDE and other ProteomeXchange resources. Barriers include the absence of a standardized infrastructure for logging access events, technical complexities in aggregating usage data across distributed and heterogeneous transfer systems (e.g., FTP, HTTP, Aspera, Globus), and ongoing concerns related to user privacy and data protection. Compounding these challenges, automated bot traffic contaminates download statistics---studies estimate that bots account for 30--70\% of all internet traffic \citep{Imperva2023}, and scientific repositories are particularly attractive targets due to their open-access policies and valuable content \citep{Orr2025}. Without accounting for this contamination, any analysis of repository usage risks drawing conclusions from inflated and distorted metrics. As bioinformatics resources continue to scale in both size and complexity, robust download analytics will become increasingly vital - not only for measuring impact - but also for enabling smarter, user-informed development of open data platforms.
+
+\begin{sloppypar}
+Here, we present the PRIDE Archive downloads infrastructure, which includes \texttt{nf-downloadstats}, a large-scale Nextflow \citep{DiTommaso2017} workflow for processing extensive traffic logs, and DeepLogBot, a bot detection framework that implements two complementary algorithms to identify and remove automated traffic. Additionally, we have developed an infrastructure that integrates download statistics directly into the PRIDE Archive interface, allowing users to sort datasets by total downloads---both raw and normalized by file count---and perform percentile-based analyses. Using these tools on 159.3 million download records from 2020 to 2025, we characterize global proteomics data reuse patterns, examining geographic distribution across countries and regions, temporal evolution of download activity, shifts in download protocol preferences, and the concentration of dataset reuse across the PRIDE collection. The workflow and resulting data are open-source and can be used by research labs and data depositors in grant reports and publications.
+\end{sloppypar}
+
+% ======================================================================
+\section{Methods}
+% ======================================================================
+
+\subsection{PRIDE Download Logs}
+
+Download logs are stored in a secure file system as compressed, comma-delimited text files. Each log entry includes a timestamp, dataset accession, filename, anonymized and non-reversible IP hash, download status, user country, download protocol (Globus, HTTP, Aspera, FTP), and dataset type. No personal or directly identifiable user data is stored. Log files are organized hierarchically by Protocol, Public/Private access, Year, Month, and Day. Individual log files can be large, ranging from 1~GB to 237~GB (Supplementary Notes Section~S1).
+
+\subsection{nf-downloadstats: Log Processing Pipeline}
+
+\begin{sloppypar}
+Due to the large volume and size of download log files, we developed \texttt{nf-downloadstats} (\url{https://github.com/PRIDE-Archive/nf-downloadstats}), an open-source Nextflow workflow for large-scale processing of the original anonymized log files (Figure~\ref{fig:bot_overview}A). Each processing step is implemented as an independent Python module, performing tasks such as removing incomplete transfers and filtering for PRIDE-specific records. A custom log file parser addresses the heterogeneity and scale of download log data; due to inconsistencies in log entries such as variable column structures and incomplete records, additional filters retain only complete transfers associated with PRIDE datasets.
+\end{sloppypar}
+
+To efficiently process the large volume of log files, parallelization is employed using a high-performance computing (HPC) environment managed via Slurm. Log files are processed in batches, with batch sizes and filtering criteria defined in a user-friendly YAML configuration file. The output is a consolidated 4.7~GB Parquet file containing 159,327,635 individual download records spanning January 2020 through January 2025. Each record includes the download date, geographic location (derived from IP geolocation), country, dataset accession, filename, download method (protocol), and an anonymized user identifier. The data covers 35,528 unique dataset accessions accessed from 235 countries.
+
+\subsection{Dataset Aggregation}
+
+For analysis, individual download events are aggregated at the \textit{location} level, where each location represents a unique geographic coordinate. This aggregation produces 71,133 location profiles, each characterized by behavioral features including download volume, user counts, temporal patterns, and access characteristics.
+
+\subsection{Bot Detection Framework}
+
+We implemented two complementary bot detection algorithms, each combining Isolation Forest anomaly detection \citep{Liu2008} with a distinct classification strategy. Both methods share a common feature extraction pipeline that computes 60+ behavioral features per location, organized into four categories: activity features (download counts, user statistics), temporal features (hourly/yearly entropy, working hours ratio), behavioral features (burst patterns, circadian deviation, coordination scores), and discriminative features (file exploration patterns, user authenticity scores). Full feature descriptions are provided in Supplementary Notes Section~S3.
+
+The \textit{rule-based} method applies YAML-configurable threshold patterns organized in a three-level hierarchy: (1) behavior type (organic vs.\ automated), (2) automation category (bot vs.\ legitimate automation), and (3) detailed subcategory (e.g., scraper, mirror, research group). Patterns are evaluated sequentially, with the first match determining classification. This approach prioritizes interpretability and configurability. The \textit{deep} method augments rule-based classification with additional behavioral feature engineering, including bot interaction features (download concentration, temporal irregularity, composite bot score) and bot signature features (request velocity, access regularity, session anomaly patterns). These 40+ additional features enable more nuanced separation of bot subtypes and borderline cases. The method also incorporates a two-stage classification pipeline: Stage~1 separates organic from automated traffic, and Stage~2 distinguishes malicious bots from legitimate automation using a discriminative scoring system with behavioral validation and dataset breadth checks to identify scraper patterns.
+
+To evaluate both algorithms, we constructed a ground truth dataset of 1,411 labeled locations (88 bots, 44 hubs, 1,279 organic) using high-confidence heuristic criteria (Supplementary Notes Section~S5). Both methods were evaluated on a 1-million record sample; we computed precision, recall, and F1 score per category, with 1,000-iteration bootstrap confidence intervals for the macro F1. The Deep method achieves the highest macro F1 score (0.775, 95\% CI: 0.731--0.818), with perfect bot recall (1.000) and strong hub detection (F1 = 0.718), while the Rules method provides higher bot precision (0.506) but detects fewer hubs (F1 = 0.275). Inter-method agreement was assessed using Cohen's kappa ($\kappa$ = 0.508), and McNemar's test reveals no significant difference between the two methods ($p = 0.877$). Detailed per-category metrics, bootstrap confidence intervals, and inter-method agreement analyses are provided in Supplementary Notes Section~S6.
+
+We applied the Deep method---the best-performing algorithm---to the full dataset (Figure~\ref{fig:bot_overview}A), classifying each of the 71,133 locations as bot, hub (legitimate automation), or organic. Locations classified as bot (53.1\%, representing 88.0\% of download traffic) were removed prior to all downstream analyses (Figure~\ref{fig:bot_overview}B; Supplementary Notes Section~S7). The remaining 33,354 non-bot locations (organic users and institutional hubs) account for 19.1 million downloads across 34,085 datasets and 213 countries.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/figure_bot_detection_overview.pdf}
+\caption{PRIDE Logs Workflow and classification results. (A) End-to-end pipeline comprising two components: \texttt{nf-downloadstats} (green dashed box) processes raw PRIDE download logs into a consolidated Parquet file, and DeepLogBot (blue dashed box) aggregates records to geographic locations and classifies them via two complementary algorithms (rule-based and deep architecture) using Isolation Forest anomaly detection and hierarchical classification. (B) Download share by classification category on the full dataset: bots account for 88.0\% of all traffic despite representing 53.1\% of locations.}
+\label{fig:bot_overview}
+\end{figure}
+
+\subsection{PRIDE Download Statistics Visualization}
+
+The aggregated download statistics produced by \texttt{nf-downloadstats} are stored in MongoDB and Elasticsearch to enable fast searching and visualization within the PRIDE Archive web interface. For each dataset, the total number of downloads is displayed alongside a gradient bar indicating its download percentile, with higher intensity representing datasets in the top 1\% of downloads (Figure~\ref{fig:pride_viz}). Additionally, a yearly trend chart is provided for each dataset, illustrating download activity over time. Datasets can be sorted by both total downloads per project and a normalized metric that accounts for the number of files within each project, enabling users to identify highly reused datasets for benchmarking or reanalysis.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\textwidth]{figures/figure_pride_visualization.png}
+\caption{PRIDE Archive download statistics integration. Each dataset displays a gradient percentile bar and total download count. A popup trend chart shows yearly download activity, enabling users to assess dataset popularity and reuse trends directly within the PRIDE interface.}
+\label{fig:pride_viz}
+\end{figure}
+
+\subsection{Usage Analysis}
+
+All usage analyses were performed on the bot-filtered dataset using DuckDB \citep{Raasveldt2019} for efficient querying. Analyses include: (1) geographic distribution of downloads by country and world region; (2) temporal trends at yearly and monthly resolution; (3) download protocol usage over time; (4) dataset popularity ranking; and (5) download concentration analysis using the Gini coefficient and Lorenz curve.
+
+% ======================================================================
+\section{Results}
+% ======================================================================
+
+\subsection{Global PRIDE Usage Patterns}
+
+The PRIDE Archive serves users in 213 countries, demonstrating truly global reach (Figure~\ref{fig:geographic}). The top five countries by download volume are the United States (5.1M downloads, 26.8\%), the United Kingdom (4.5M, 23.6\%), Germany (4.3M, 22.5\%), South Korea (869K, 4.6\%), and Canada (691K, 3.6\%). Europe accounts for the largest share of downloads (55.7\%), followed by the Americas (30.7\%) and Asia (11.4\%).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/figure1_geographic_distribution.pdf}
+\caption{Geographic distribution of PRIDE downloads. Top 20 countries by download volume after bot removal (2020--2025).}
+\label{fig:geographic}
+\end{figure}
+
+To characterize the relationship between user base size and download intensity, we plotted total downloads against unique users for the top 50 countries (Figure~\ref{fig:bubble}A). Two distinct usage patterns emerge. Countries such as the United States (63,944 users, 80 downloads/user), France (10,844 users, 15 downloads/user), and Canada (9,124 users, 76 downloads/user) exhibit broad user bases with moderate per-user download volumes, consistent with diverse individual researchers accessing specific datasets of interest. In contrast, Hong Kong (176 users, 832 downloads/user), Singapore (703 users, 478 downloads/user), South Korea (2,210 users, 393 downloads/user), and the United Kingdom (11,659 users, 386 downloads/user) show higher per-user download intensity, suggesting concentrated institutional access patterns such as systematic data mirroring or large-scale reanalysis efforts. This distinction highlights that aggregate download volume alone does not fully capture the nature of data reuse, and that institutional access patterns vary markedly between countries.
+
+Although European countries account for the majority of PRIDE downloads, yearly trends reveal shifting dynamics (Figure~\ref{fig:bubble}B). Germany showed a pronounced peak in 2023 (2.4M downloads) before declining, while the United Kingdom peaked in 2022 (1.8M) with subsequent moderation. Notably, PRIDE usage is growing in low- and middle-income countries (Figure~\ref{fig:bubble}C). India (55K downloads), Mexico (23K), and Brazil (12K) show emerging download activity, with countries such as Turkey and the Philippines also contributing. This growth suggests that PRIDE is increasingly serving as a resource for researchers in developing nations, supporting broader global participation in proteomics data reuse.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/figure7_country_bubble.pdf}
+\caption{Global country-level download patterns. (A) Total downloads versus unique users for the top 50 countries by download volume; bubble size and color represent downloads per user on a log scale, revealing broad individual access (lower right) versus concentrated institutional access (upper left). (B) Yearly download trends for the top 15 European countries showing shifting dominance. (C) Yearly download trends for low- and middle-income countries, demonstrating accelerating adoption since 2024.}
+\label{fig:bubble}
+\end{figure}
+
+\subsection{Temporal Trends}
+
+Download activity has grown substantially over the study period (Figure~\ref{fig:temporal}). Annual downloads increased from 1.2 million in 2021 to 3.5 million in 2022, peaking at 5.8 million in 2025. The number of unique datasets accessed per year grew from 14,879 in 2021 to 18,621 in 2024, reflecting both the growing PRIDE collection and increasing data reuse.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/figure2_temporal_trends.pdf}
+\caption{Temporal trends in PRIDE usage. (A) Annual download volume in millions. (B) Growth in unique datasets accessed and unique locations per year.}
+\label{fig:temporal}
+\end{figure}
+
+\subsection{Protocol Usage}
+
+Download protocol preferences have shifted over the study period (Figure~\ref{fig:protocols}A). FTP was the dominant protocol in 2021, accounting for 65\% of genuine downloads. HTTP overtook FTP in 2022 (54\%), but FTP surged again in 2023 (79\%), likely driven by institutional hub traffic that relies on FTP for bulk transfers. By 2025, HTTP re-emerged as the leading protocol (69\%), reflecting broader adoption of web-based download tools. Despite superior transfer performance for large files, advanced protocols such as Aspera and Globus remain in early adoption stages, accounting for 3.3\% and 1.0\% of 2025 downloads respectively. To lower adoption barriers, we released \texttt{pridepy} \citep{Kamatchinathan2025} in March 2025, a Python-based command-line tool that abstracts protocol complexity and enables seamless switching between FTP, Aspera, and Globus transfers with a single command. A monthly breakdown of 2025 downloads (Figure~\ref{fig:protocols}B) shows emerging Aspera usage alongside sustained Globus adoption, indicating that providing user-friendly tooling can facilitate the transition to high-performance transfer protocols in scientific data repositories.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/figure4_protocol_usage.pdf}
+\caption{Download protocol usage. (A) Annual download volume by protocol (2021--2025), showing the alternation between FTP and HTTP dominance. (B) Monthly breakdown of 2025 showing protocol usage patterns.}
+\label{fig:protocols}
+\end{figure}
+
+\subsection{Download Concentration}
+
+Dataset reuse follows a highly skewed distribution characteristic of heavy-tailed systems (Figure~\ref{fig:concentration}A). The Gini coefficient of 0.84 indicates substantial inequality: the top 1\% of datasets (341 datasets) account for 43.3\% of all downloads, the top 10\% account for 77.2\%, and the bottom 50\% of datasets collectively represent only 3.1\% of downloads. The median dataset has received 85 downloads, while the most popular exceeds 355,000. The rank-frequency distribution reveals a characteristic long tail, with download counts dropping steeply beyond the top 1\% of datasets.
+
+Importantly, the most downloaded datasets are not one-time events but show sustained reuse over multiple years (Figure~\ref{fig:concentration}B). Of the top 25 datasets, most have been actively downloaded in at least 4 of the 5 years covered (2021--2025), and PXD000001---the first dataset deposited in PRIDE---has been downloaded every year. Several datasets exhibit pronounced temporal spikes (e.g., PXD021013 with 303K downloads, PXD029360 with 148K), likely reflecting their use as benchmarks in specific studies or community challenges. Others maintain steady download rates across years (e.g., PXD004732, PXD000561), suggesting their role as long-term reference datasets for the proteomics community. A ranking of the top 20 most downloaded datasets and extended analyses are provided in Supplementary Notes Section~S8.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/figure5_dataset_concentration.pdf}
+\caption{Dataset reuse concentration and consistency. (A) Rank-frequency distribution on log-log scale; the dashed red line marks the top 1\% boundary, beyond which download counts drop sharply (Gini = 0.84). (B) Download consistency heatmap for the top 25 most downloaded datasets (2021--2025, after bot removal); color intensity represents download count on a log$_{10}$ scale. Most top datasets show sustained reuse across 4--5 years, indicating their role as community reference and benchmark datasets. (C) Relationship between EuropePMC reuse citations and download volume for the top 50 most downloaded datasets (n$-$1 correction to exclude the original submission); point color indicates download consistency (fraction of years active out of five), grey points represent datasets with no independent reuse citations.}
+\label{fig:concentration}
+\end{figure}
+
+To assess whether download popularity reflects broader scientific impact, we queried EuropePMC for reuse citations of each dataset accession among the top 50 most downloaded datasets, subtracting the original submission publication to count only independent reuse mentions (Figure~\ref{fig:concentration}C). Of these, 37 datasets (74\%) have been cited in at least one independent publication beyond their original submission, with a median of 2 reuse citations and a maximum of 52 (PXD000561). While the correlation between download volume and reuse citation count shows a positive trend, it does not reach statistical significance (Spearman $\rho$ = 0.206, $p$ = 0.22), suggesting that high download counts do not simply mirror publication visibility. This indicates that sustained, multi-year download activity---rather than raw download volume alone---is the stronger signal of genuine community adoption and complements publication-based impact metrics.
+
+\subsection{Download Hubs}
+
+Our classification identified 664 download hubs distributed across 58 countries (Figure~\ref{fig:hubs}), accounting for 18.0 million downloads. These hubs represent institutions that systematically and continuously reanalyze public proteomics data \citep{PerezRiverol2022reanalysis}, including institutional mirrors, research infrastructure nodes, and data aggregation services. The United States hosts the most hubs (155), followed by Germany (99), Japan (46), and the Netherlands (38), with total hub download volume led by the United States (4.7M), the United Kingdom (4.5M), and Germany (4.2M). The geographic spread of hubs---spanning all continents---demonstrates that systematic data reuse is not confined to a few centers but is a global phenomenon. Hub characteristics vary widely: some operate with very few users but extremely high per-user download rates (e.g., Dresden with 275K downloads/user from 8 users, consistent with a mirror), while others involve hundreds of users accessing data at moderate intensity (e.g., Hefei with 1,645 users).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/figure_hub_distribution.pdf}
+\caption{Distribution and characteristics of 664 identified download hubs. (A) Geographic locations, with bubble size proportional to download volume. (B) Top 15 countries by number of hubs, annotated with total hub download volume. (C) Hub diversity: unique users versus total downloads on log-log scale, showing the range from single-user mirrors to multi-user reanalysis infrastructure.}
+\label{fig:hubs}
+\end{figure}
+
+\subsection{File Type Download Patterns}
+
+More than 81\% of all downloads originate from five countries, and developing countries are largely absent from the top 10. Analysis of file type download patterns across regions reveals distinct usage profiles (Figure~\ref{fig:filetype}): East Asian and North American users download predominantly raw instrument files (72--73\%), while LMIC countries show a slightly lower raw file proportion (54\%) with a corresponding increase in result files and processed spectra \citep{PerezRiverol2022reanalysis}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/figure_filetype_by_region.pdf}
+\caption{File type download patterns by region (after bot removal). (A) Percentage of downloads by file type category across four regions. LMIC countries show lower raw file usage and higher result/processed spectra downloads compared to East Asia and North America. (B) Aggregated view: raw + processed spectra (full reanalysis capability) versus results + metadata (lightweight reuse). LMIC countries have the lowest reanalysis-oriented profile (55\%) and the highest lightweight reuse proportion (15\%).}
+\label{fig:filetype}
+\end{figure}
+
+% ======================================================================
+\section{Discussion}
+% ======================================================================
+
+\begin{sloppypar}
+The finding that 88.0\% of PRIDE download traffic is automated is striking, considerably exceeding the 30--50\% bot share reported for general internet traffic \citep{Imperva2023}. Scientific data repositories are disproportionately targeted because they offer unauthenticated, persistent, and predictable access to valuable content---making bot detection a prerequisite for any meaningful usage analysis. Without filtering, the most ``popular'' datasets may simply be the most bot-targeted, rendering raw download counts unreliable as impact indicators. This is consequential because download statistics are increasingly used by funding agencies, institutions, and researchers as evidence of data impact alongside traditional citation metrics \citep{PerezRiverol2019}. Our framework demonstrates that combining anomaly detection with behavioral classification can recover genuine usage signals; however, as AI-driven platforms that perform large-scale automated reanalysis become more prevalent, the boundary between harmful scraping and beneficial programmatic access will become increasingly blurred, and repositories will need adaptive classification schemes that evolve alongside legitimate automation patterns.
+
+PRIDE downloads have grown from 1.2 million in 2021 to 5.8 million in 2025, confirming accelerating data reuse across a geographically broad user base (213 countries). Download intensity varies markedly: some countries exhibit broad individual user bases (e.g., United States with 64K users), while others show concentrated institutional access (e.g., Hong Kong with 832 downloads/user, Singapore with 478 downloads/user), suggesting that the nature of reuse---individual exploration versus systematic reanalysis---differs between research communities. The 664 download hubs we identified reveal a global infrastructure of institutional data consumers, from single-user mirrors performing full-repository synchronization to multi-user reanalysis centers processing hundreds of datasets. This hub distribution provides an empirical map of where proteomics bioinformatics infrastructure exists and can inform ProteomeXchange decisions about mirror placement, edge caching, and regional resource allocation---for instance, countries with growing user bases but no local hubs (e.g., India, Brazil, Mexico) may benefit from targeted infrastructure support. FTP and HTTP have alternated as the dominant protocol, with the shift to HTTP dominance in 2025 (69\%) reflecting both broader individual adoption and the growing importance of API-based programmatic access; advanced protocols (Aspera, Globus) remain in early stages (1.4\% of genuine traffic), but tools such as \texttt{pridepy} \citep{Kamatchinathan2025} should lower adoption barriers as datasets continue to grow in size.
+
+Dataset reuse is highly concentrated (Gini = 0.84), with the top 1\% of datasets accounting for 43.3\% of all downloads. While benchmark datasets such as PXD000001 show sustained multi-year reuse, the ``long tail'' of rarely downloaded datasets should not be disregarded: these datasets may gain future value through meta-analyses, machine learning applications, or integration into multi-omics studies. Repositories can better serve both ends of this distribution by investing in improved discoverability---richer metadata, curated tags, and recommendation systems---alongside prioritized access for high-demand datasets. Regional differences in file type usage, with LMIC countries showing higher reliance on processed results rather than raw files, suggest that computational capacity and bandwidth constraints shape reuse patterns. Several ongoing efforts address this: \texttt{quantms} \citep{Dai2024} generates standardized reanalysis outputs from public datasets, the PTMExchange initiative (\url{https://www.proteomexchange.org/ptmexchange}) provides curated post-translational modification results, and the PRIDE team is collaborating with developers of widely used search engines---including DIA-NN \citep{Demichev2020}, MaxQuant \citep{Cox2008}, and MSFragger \citep{Kong2017}---to define standardized submission guidelines that ensure result files, quantification tables, and metadata are structured for immediate reuse. More broadly, the \texttt{nf-downloadstats} pipeline and DeepLogBot framework are applicable to any open data repository facing similar challenges, including genomics (ENA/SRA), structural biology (PDB), and metabolomics (MetaboLights) resources.
+\end{sloppypar}
+
+% ======================================================================
+\section{Conclusion}
+% ======================================================================
+
+We present the PRIDE Archive download tracking infrastructure and the first comprehensive analysis of download patterns from the PRIDE proteomics archive, covering 159 million records over five years. The infrastructure comprises \texttt{nf-downloadstats}, a scalable Nextflow pipeline for processing large-scale download logs, and DeepLogBot, a bot detection framework with two complementary algorithms achieving up to 0.775 macro F1. After removing 88.0\% of traffic identified as automated, we obtain reliable usage metrics for 19.1 million genuine downloads spanning 34,085 datasets.
+
+Our analysis reveals a globally distributed user base led by the United States, the United Kingdom, and Germany, a transition from FTP to HTTP-based access with emerging adoption of high-throughput protocols (Aspera, Globus), and a highly concentrated dataset reuse distribution. On average, any PRIDE dataset file has been downloaded at least 30 times from 2021 to 2025, and more than 96\% of the datasets in PRIDE have been downloaded at least once. These findings provide evidence for the growing impact of open proteomics data and offer actionable insights for repository infrastructure planning. Tools such as \texttt{pridepy} \citep{Kamatchinathan2025} for simplified protocol-agnostic downloads and \texttt{quantms} \citep{Dai2024} for public dataset reanalysis complement this infrastructure to facilitate broader data reuse. The \texttt{nf-downloadstats} pipeline and DeepLogBot framework are freely available to enable similar analyses for other scientific repositories.
+
+\section*{Data and Code Availability}
+
+\begin{sloppypar}
+The \texttt{nf-downloadstats} pipeline is available at \url{https://github.com/PRIDE-Archive/nf-downloadstats} and the DeepLogBot software at \url{https://github.com/ypriverol/deeplogbot}, both under the Apache 2.0 license. Download log data is available upon request from the PRIDE team.
+\end{sloppypar}
+
+\section*{Funding}
+
+This work was supported by EMBL core funding.
+
+\section*{Acknowledgements}
+
+S.H. implemented the nextflow workflow; and the collected the data; J.B implemented web interface for the downloads components; C.B, S.K. implemented the integration of the statistics components in the backend of PRIDE and databases; D.J.K, N.S.J. contributed to review the manuscript; the data generated and curate some of the datasets; M.R.D. generated the infrastructure for logs anonimization and provided the logs files to PRIDE team, J.A.V. review the manuscript, Y.P-R design the study; developed the bot detection framework; performed the analysis and wrote the manuscript. We thank the PRIDE team for their support and feedback on the development of the download tracking infrastructure and analysis. We also wants to thanks professor Bernard Kuster for the original discussion about this topic in 2024 during the 2024 HUPO conference in Dresden
+
+\section*{Conflict of Interest}
+
+The authors declare no conflict of interest.
+
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+
+\end{document}

@@ -1,63 +1,70 @@
-# LogGhostbuster
+# DeepLogBot
 
-LogGhostbuster: A hybrid Isolation Forest-based system for detecting bot behavior in log data.
+Bot detection and traffic classification for scientific data repository logs.
 
 ## Overview
 
-LogGhostbuster is a hybrid machine learning system that detects bot behavior and download hubs in log data. It combines unsupervised anomaly detection with rule-based classification to identify suspicious download patterns.
+DeepLogBot (CLI: `deeplogbot`) detects and classifies download patterns in scientific data repository logs, distinguishing between:
 
-### Algorithm Overview
+- **Organic users** — Human researchers with natural download patterns
+- **Bots** — Automated scrapers, crawlers, and coordinated bot farms
+- **Download hubs** — Legitimate mirrors, institutional pipelines, and data aggregators
 
-The system follows a multi-stage pipeline:
+Applied to the PRIDE Archive (159M download records), the system identified that **88% of traffic is bot-generated**. After filtering, **19.1M clean downloads** remain across 34,085 datasets and 213 countries.
 
-1. **Feature Extraction**: Extracts location-level behavioral features from log data:
-   - User activity patterns (unique users, downloads per user, user density per hour)
-   - Temporal patterns (hourly entropy, working hours ratio, yearly patterns)
-   - Anomaly indicators (spike ratios, latest year concentration, new location flags)
-   - Geographic patterns (country-level aggregations for coordinated detection)
+### Hierarchical Classification Taxonomy
 
-2. **Anomaly Detection**: Uses **Isolation Forest** to identify anomalous locations:
-   - Isolation Forest is an unsupervised algorithm that isolates anomalies by randomly selecting features and split values
-   - Locations with unusual behavioral patterns (short path lengths in the isolation tree) are flagged as anomalies
-   - The contamination parameter controls the expected proportion of anomalies (default: 15%)
+```
+behavior_type (Level 1)
+├── ORGANIC
+│   ├── individual_user
+│   ├── research_group
+│   └── casual_bulk
+│
+└── AUTOMATED
+    ├── BOT
+    │   ├── scraper_bot
+    │   ├── crawler_bot
+    │   └── coordinated_bot
+    │
+    └── LEGITIMATE_AUTOMATION (Hub)
+        ├── mirror
+        ├── institutional_hub
+        ├── ci_cd_pipeline
+        ├── data_pipeline
+        └── data_aggregator
+```
 
-3. **Classification**: Classifies anomalies into categories using either rule-based or ML-based methods:
-   
-   **Rule-based classification** (default): Uses a comprehensive set of pattern-based rules:
-   - **BOT**: Detected when anomalies exhibit bot-like characteristics:
-     - Low downloads per user (< 100) combined with high user counts (> 5K-30K users)
-     - Sudden spikes in activity (high spike ratios and latest year concentration)
-     - New locations with suspicious patterns
-     - Geographic bot farms (coordinated patterns across country-level metrics)
-   
-   - **DOWNLOAD_HUB**: Detected when anomalies show hub-like characteristics:
-     - Very high downloads per user (> 500) - mirrors/single-user hubs
-     - High total downloads (> 150K) with moderate downloads per user (50-500) and regular working hours patterns - research institutions
-   
-   **Supervised ML-based classification** (optional): Uses a RandomForestClassifier trained on rule-based labels:
-   - First generates training labels using rule-based classification
-   - Trains a multi-class classifier (BOT, DOWNLOAD_HUB, NORMAL) on behavioral features
-   - Can generalize better to edge cases and learn complex feature interactions
-   - Provides feature importance rankings for interpretability
-   - Use `--classification-method ml` to enable
-   
-   **Unsupervised ML-based classification** (optional): Uses KMeans clustering:
-   - Clusters locations into 3 groups based on behavioral features
-   - Maps clusters to bot/hub/normal based on cluster characteristics
-   - No labels required - fully unsupervised approach
-   - Useful when rule-based patterns may not capture all patterns
-   - Use `--classification-method ml-unsupervised` to enable
+## Classification Methods
 
-4. **Geographic Grouping** (optional): Groups nearby hub locations using:
-   - Haversine distance calculation (default: 10km threshold)
-   - Optional LLM-based canonical naming for institutions
+DeepLogBot provides **2 classification methods**:
 
-5. **Output Generation**: Produces annotated data and comprehensive reports with detection results.
+| Method | Macro F1 | Speed | Description |
+|--------|----------|-------|-------------|
+| `rules` | 0.632 | Fast | YAML-configurable thresholds, no training required |
+| `deep` | 0.775 | Medium | Multi-stage learned pipeline with soft priors |
 
-### Detection Targets
+*Benchmarked on a 1M-record sample with manually curated ground truth.*
 
-- **Bot downloads** - Automated downloads from bot farms (characterized by user ID cycling with low downloads per user)
-- **Download hubs** - Legitimate mirrors/institutions with high download volumes (characterized by high downloads per user or regular institutional patterns)
+### Rule-Based (`--classification-method rules`)
+
+Hierarchical threshold classification using YAML-configurable rules. Fast, interpretable, and requires no training. Best for production use with known patterns.
+
+### Deep Architecture (`--classification-method deep`)
+
+Multi-stage learned pipeline:
+
+1. **Seed Selection** — Identify high-confidence bot/organic/hub seeds from feature distributions
+2. **Organic VAE** — Learn the normal-behavior manifold; score reconstruction error
+3. **Deep Isolation Forest** — Non-linear anomaly detection on VAE latent space
+4. **Temporal Consistency** — Modified z-score spike detection (no fixed thresholds)
+5. **Fusion Meta-Learner** — Gradient-boosted combination of all anomaly signals
+
+Additional components:
+- **Soft priors** — Pre-filter signals encoded as continuous features (no hard lockout)
+- **Reconciliation** — Override thresholds for cases where pipeline and pre-filter disagree
+- **Hub protection** — Prevent legitimate automation from being classified as bots
+- **Post-classification** — Detailed subcategory assignment
 
 ## Installation
 
@@ -65,157 +72,222 @@ The system follows a multi-stage pipeline:
 pip install -e .
 ```
 
-Or with optional LLM dependencies for location grouping:
-```bash
-pip install -e ".[llm]"
-```
+### Requirements
+
+- Python 3.9+
+- pandas, numpy, scikit-learn, scipy, duckdb
+- Optional: torch (for deep method)
 
 ## Usage
 
 ### Command Line
 
 ```bash
-logghostbuster --input data_downloads_parquet.parquet --output-dir output/bot_analysis
+# Rule-based classification (default)
+deeplogbot -i data.parquet -o output/
+
+# Deep architecture
+deeplogbot -i data.parquet -o output/ -m deep
+
+# With sampling for large datasets
+deeplogbot -i data.parquet -o output/ -m deep --sample-size 1000000
 ```
 
-Options:
-- `--input, -i`: Input parquet file (default: `original_data/data_downloads_parquet.parquet`)
-- `--output, -out`: Output parquet file (default: overwrites input)
-- `--output-dir, -o`: Output directory for reports (default: `output/bot_analysis`)
-- `--contamination, -c`: Expected proportion of anomalies (default: 0.15)
-- `--compute-importances`: Compute feature importances (optional, slower)
-- `--sample-size, -s`: Randomly sample N records from all years before processing (e.g., 1000000 for 1M records)
-- `--classification-method, -m`: Classification method - `rules` for rule-based (default), `ml` for supervised ML-based, or `ml-unsupervised` for unsupervised ML-based
+**Options:**
 
-### Known Issues
-
-- **Deep Classification with Large Sample Sizes**: When using the `--classification-method deep`, the algorithm encounters an issue and may get stuck during the data loading and feature extraction phase (specifically within the `TimeWindowExtractor`) when a `--sample-size` of 50,000,000 (50M) records is specified. Interestingly, the process completes successfully for smaller sample sizes (e.g., 5M records) and for the entire dataset without any sampling. This suggests a specific bottleneck at the 50M sample size. This issue is currently under investigation. For large datasets, consider using no `--sample-size` or a smaller `sample-size` (e.g., 5M) until this is resolved.
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-i, --input` | Input parquet file | Required |
+| `-o, --output-dir` | Output directory | `output/bot_analysis` |
+| `-m, --classification-method` | `rules` or `deep` | `rules` |
+| `-c, --contamination` | Anomaly proportion | `0.15` |
+| `-s, --sample-size` | Sample N records | None (use all) |
+| `-p, --provider` | Log provider | `ebi` |
 
 ### Python API
 
 ```python
-from logghostbuster import run_bot_annotator
+from deeplogbot import run_bot_annotator
 
+# Rule-based classification
 results = run_bot_annotator(
-    input_parquet='data_downloads_parquet.parquet',
-    output_parquet='annotated_data.parquet',
-    output_dir='output/bot_analysis',
-    contamination=0.15,
-    compute_importances=False,
-    sample_size=1000000,  # Optional: sample 1M records
-    classification_method='ml'  # 'rules' (default), 'ml' (supervised), or 'ml-unsupervised'
+    input_parquet='data.parquet',
+    output_dir='output/',
+    classification_method='rules'
 )
+
+# Deep architecture
+results = run_bot_annotator(
+    input_parquet='data.parquet',
+    output_dir='output/',
+    classification_method='deep'
+)
+
+print(f"Bots detected: {results['bot_count']}")
+print(f"Hubs detected: {results['hub_count']}")
 ```
 
-## Package Structure
+## Project Structure
 
-- `logghostbuster/`
-  - `__init__.py` - Package initialization and exports
-  - `main.py` - Main bot detection pipeline and CLI
-  - `utils/` - Utility functions package
-    - `__init__.py` - General utilities (logging, formatting) and exports
-    - `geography.py` - Geographic utility functions (haversine distance, coordinate parsing, location grouping)
-  - `features/` - Feature extraction package
-    - `__init__.py` - Feature extraction exports
-    - `schema.py` - Schema definitions for different log formats
-    - `base.py` - Base feature extractor class
-    - `extraction.py` - Main feature extraction function
-    - `standard.py` - Standard extractors (yearly, time-of-day, country-level)
-    - `providers/` - Provider-specific extractors
-      - `ebi.py` - EBI-specific extractors (if needed)
-  - `isoforest/` - Isolation Forest model package
-    - `__init__.py` - Model exports
-    - `models.py` - Isolation Forest training and feature importance
-    - `classification.py` - Bot and download hub classification logic
-  - `llm/` - LLM utilities package
-    - `__init__.py` - LLM exports
-    - `utils.py` - LLM utilities for canonical naming (optional)
-  - `reports/` - Report generation and annotation package
-    - `__init__.py` - Report exports
-    - `annotation.py` - Annotation utilities for marking locations with bot/download_hub flags
-    - `reporting.py` - Generic report generator
-
-## Custom Schemas and Feature Extractors
-
-The tool supports different log formats through schema definitions and extensible feature extractors.
-
-### Using Custom Schemas
-
-```python
-from logghostbuster import LogSchema, run_bot_annotator
-
-# Define a custom schema for your log format
-custom_schema = LogSchema(
-    location_field="ip_coordinates",
-    country_field="country_code",
-    user_field="user_id",
-    timestamp_field="event_time",
-    # ... other field mappings
-)
-
-# Use it with the pipeline
-results = run_bot_annotator(
-    input_parquet='your_logs.parquet',
-    schema=custom_schema,
-)
+```
+deeplogbot/
+├── __init__.py                  # Package exports
+├── main.py                      # CLI entry point and pipeline
+├── config.py                    # Configuration loading
+├── config.yaml                  # Main configuration file
+│
+├── features/                    # Feature extraction (~117 features)
+│   ├── base.py                  # Base extractor class
+│   ├── schema.py                # Log schema definitions
+│   ├── registry.py              # Feature documentation registry
+│   └── providers/
+│       └── ebi/                 # EBI/PRIDE provider
+│           ├── ebi.py           # Location feature extraction
+│           ├── behavioral.py    # Behavioral features
+│           ├── discriminative.py # Discriminative features
+│           ├── timeseries.py    # Time series features
+│           └── schema.py        # EBI-specific schema
+│
+├── models/
+│   ├── isoforest/               # Isolation Forest anomaly detection
+│   │   └── models.py
+│   └── classification/          # Classification methods
+│       ├── rules.py             # Rule-based hierarchical classifier
+│       ├── deep_architecture.py # Deep pipeline orchestration
+│       ├── seed_selection.py    # High-confidence seed identification
+│       ├── organic_vae.py       # VAE + Deep Isolation Forest
+│       ├── temporal_consistency.py # Modified z-score spike detection
+│       ├── fusion.py            # Gradient-boosted meta-learner
+│       ├── post_classification.py # Hub protection & subcategory assignment
+│       └── feature_validation.py  # Feature usage validation
+│
+├── reports/                     # Output generation
+│   ├── reporting.py             # Text report generation
+│   ├── annotation.py            # Parquet annotation
+│   ├── statistics.py            # Summary statistics
+│   ├── html_report.py           # Interactive HTML reports
+│   └── visualizations.py        # Charts and plots
+│
+├── utils/                       # Utilities
+│   └── geography.py             # Geographic lookups
+│
+└── providers/
+    └── base_taxonomy.yaml       # Classification taxonomy
 ```
 
-### Creating Custom Feature Extractors
+## Configuration
 
-```python
-from logghostbuster import BaseFeatureExtractor
-import pandas as pd
+Configuration is in `deeplogbot/config.yaml`:
 
-class MyCustomExtractor(BaseFeatureExtractor):
-    def extract(self, df: pd.DataFrame, input_parquet_path: str, conn) -> pd.DataFrame:
-        # Add your custom features here
-        df['my_custom_feature'] = ...  # Your calculation
-        return df
+```yaml
+isolation_forest:
+  contamination: 0.15
+  n_estimators: 200
+  random_state: 42
 
-# Use custom extractors
-results = run_bot_annotator(
-    input_parquet='your_logs.parquet',
-    custom_extractors=[MyCustomExtractor(schema)],
-)
+classification:
+  rule_based:
+    bots:
+      require_anomaly: true
+      patterns:
+        - downloads_per_user: {max: 100}
+          unique_users: {min: 5000}
+    hubs:
+      require_anomaly: true
+      patterns:
+        - downloads_per_user: {min: 500}
+
+deep_reconciliation:
+  override_threshold: 0.7
+  strict_threshold: 0.8
 ```
 
-See `examples/custom_schema_example.py` for more detailed examples.
+## Classifying a Download Parquet File
 
-## Detection Methodology
+Given a parquet file of download logs (one row per download event), DeepLogBot aggregates records by geographic location, extracts ~117 behavioral and discriminative features, classifies each location as bot/hub/organic, and writes a new annotated parquet with classification columns appended to every row.
 
-1. Extract location-level features (users, downloads, patterns, time-of-day)
-2. Apply Isolation Forest anomaly detection
-3. Classify anomalies as:
-   - **BOT**: low downloads/user + many users
-   - **DOWNLOAD_HUB**: high downloads/user (mirrors) or high total downloads with regular patterns (research institutions)
-4. Group nearby hub locations using geographic distance + optional LLM consolidation
+### Input format
 
-## Environment Variables
+The input parquet must contain at minimum:
 
-- `USE_LLM_GROUPING`: Enable/disable LLM-based location grouping (default: `true`)
-- `HF_MODEL`: Hugging Face model name (default: `microsoft/DialoGPT-medium`)
+| Column | Description |
+|--------|-------------|
+| `accession` | Dataset accession (e.g., `PXD000001`) |
+| `geo_location` | Geographic location string (city/region) |
+| `country` | Country name or code |
+| `year` | Download year |
+| `date` | Download date |
 
-## Comparing Classification Methods
-
-A comparison script is provided to evaluate all three classification methods on the same dataset:
+### Running classification
 
 ```bash
-python compare_classification_methods.py \
-    --input data_downloads_parquet.parquet \
-    --sample-size 3000000 \
-    --output-dir output/comparison
+# Classify with the deep method (recommended) — writes <input>_annotated.parquet
+deeplogbot -i downloads.parquet -o output/ -m deep
+
+# Classify with rules (faster, no torch required)
+deeplogbot -i downloads.parquet -o output/ -m rules
+
+# For large files, sample first to speed up classification
+deeplogbot -i downloads.parquet -o output/ -m deep --sample-size 5000000
 ```
 
-This will:
-- Run all three methods (rules, supervised ML, unsupervised ML) on the same sampled data
-- Generate comparison reports showing differences between methods
-- Create CSV files with detailed comparison metrics
-- Save individual results for each method
+The annotated parquet is written to the output directory with an `_annotated` suffix (e.g., `output/downloads_annotated.parquet`). You can also specify an explicit output path:
 
-## Output
+```bash
+deeplogbot -i downloads.parquet -o output/ -m deep --output output/classified.parquet
+```
 
-The tool generates:
-- Annotated parquet file with `bot` and `download_hub` columns
-- `bot_detection_report.txt` - Comprehensive detection report
-- `location_analysis.csv` - Full analysis of all locations
-- `feature_importances/` - Feature importance analysis (if enabled)
+### Output strategies
+
+| Strategy | Flag | Behavior |
+|----------|------|----------|
+| `new_file` (default) | `--output-strategy new_file` | Creates `<input>_annotated.parquet` in the output directory |
+| `overwrite` | `--output-strategy overwrite` | Rewrites the original parquet in place |
+| `reports_only` | `--reports-only` | Generates text/HTML reports without writing a parquet |
+
+### Using the annotated parquet
+
+```python
+import duckdb
+
+conn = duckdb.connect()
+df = conn.execute("""
+    SELECT accession, country, year,
+           is_bot, is_hub, is_organic,
+           behavior_type, automation_category, subcategory
+    FROM read_parquet('output/downloads_annotated.parquet')
+    LIMIT 10
+""").df()
+
+# Filter to clean (non-bot, non-hub) downloads
+clean = conn.execute("""
+    SELECT accession, country, COUNT(*) as downloads
+    FROM read_parquet('output/downloads_annotated.parquet')
+    WHERE is_bot = false AND is_hub = false
+    GROUP BY accession, country
+    ORDER BY downloads DESC
+""").df()
+```
+
+## Output Format
+
+The annotated output parquet contains:
+
+| Column | Description |
+|--------|-------------|
+| `is_bot` | Bot classification flag |
+| `is_hub` | Download hub classification flag |
+| `is_organic` | Organic user classification flag |
+| `behavior_type` | `organic` or `automated` |
+| `automation_category` | `bot` or `legitimate_automation` |
+| `subcategory` | Detailed category (e.g., `mirror`, `scraper_bot`) |
+| `classification_confidence` | Confidence score (0-1) |
+
+Reports generated:
+- `bot_detection_report.txt` — Summary with counts and breakdowns
+- `location_analysis.csv` — Per-location features and classifications
+- Interactive HTML report (if enabled)
+
+## License
+
+MIT

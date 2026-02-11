@@ -3,14 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "logghostbuster"
+name = "deeplogbot"
 version = "0.1.0"
-description = "A hybrid Isolation Forest-based system for detecting bot behavior in log data"
+description = "Bot detection and traffic classification for scientific data repository logs"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "LogGhostbuster Contributors"}
+    {name = "DeepLogBot Contributors"}
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -39,9 +39,9 @@ llm = [
 ]
 
 [project.scripts]
-logghostbuster = "logghostbuster.main:main"
+deeplogbot = "deeplogbot.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["logghostbuster*"]
+include = ["deeplogbot*"]
 

@@ -1,0 +1,506 @@
+duckdb:
+  memory_limit: "10GB"
+  max_temp_directory_size: "10GiB"
+  temp_directory: "./duckdb-tmp/"
+
+# Classification rules for bot and hub detection
+classification:
+  # Hub protection rules - locations matching these are NEVER classified as bots
+  hub_protection:
+    # Very high downloads per user indicates institutional mirror
+    high_dl_per_user:
+      min_downloads_per_user: 500
+    # Few users with high download activity (research labs)
+    few_users_high_dl:
+      max_users: 100
+      min_downloads_per_user: 100
+    # Single user with moderate+ activity (heavy individual use)
+    single_user:
+      max_users: 1
+      min_downloads_per_user: 50
+    # Very few users with high activity
+    very_few_users:
+      max_users: 10
+      min_downloads_per_user: 200
+
+  # Bot detection rules
+  bot_detection:
+    # Ground truth bots - highest confidence
+    ground_truth:
+      min_users: 10000
+      max_downloads_per_user: 10
+    # Large scale bot patterns
+    large_scale:
+      min_users: 5000
+      max_downloads_per_user: 100
+    # Many users with low downloads per user
+    many_users_low_dl:
+      min_users: 1000
+      max_downloads_per_user: 20
+    # Very many users with moderate downloads
+    very_many_users_moderate_dl:
+      min_users: 5000
+      min_downloads_per_user: 20
+      max_downloads_per_user: 100
+    # Moderate users with suspicious pattern
+    moderate_users_suspicious:
+      min_users: 500
+      max_users: 5000
+      min_downloads_per_user: 10
+      max_downloads_per_user: 50
+    # Bot head override protection
+    bot_head_override:
+      min_users: 100
+      max_downloads_per_user: 100
+
+  # Download hub thresholds
+  download_hub:
+    # Definite hub - very high downloads per user
+    definite:
+      min_downloads_per_user: 1000
+    # Standard hub threshold
+    standard:
+      min_downloads_per_user: 500
+      max_users: 100
+
+  # Independent user thresholds
+  independent_user:
+    max_users: 5
+    max_downloads_per_user: 3
+
+  # Stratified pre-filtering thresholds (for deep architecture)
+  # These are used to quickly filter obvious cases before deep learning
+  stratified_prefiltering:
+    # Obvious bot patterns - locations matching these are immediately classified as bots
+    obvious_bots:
+      min_users: 2000  # >2000 users = obvious bot
+      # Note: Single users with high downloads are excluded (they're hubs, not bots)
+      # Coordinated bot activity: many users with LOW downloads per user
+      many_users_low_dl:
+        min_users: 500
+        max_downloads_per_user: 100  # <100 DL/user (not >100!)
+      large_scale_low_dl:
+        min_users: 100
+        max_downloads_per_user: 200  # <200 DL/user (not >200!)
+    
+    # Obvious legitimate patterns - locations matching these are immediately classified as independent users
+    obvious_legitimate:
+      max_users: 5
+      max_downloads_per_user: 3
+      max_total_downloads: 50
+      max_anomaly_score: 0.15
+
+  # Bot score weights for smart label generation
+  bot_score_weights:
+    many_users_low_dl: 0.7
+    very_many_users_moderate_dl: 0.6
+    moderate_users_suspicious: 0.4
+    high_anomaly: 0.2
+    very_high_anomaly: 0.15
+    non_working_hours: 0.25
+    low_entropy: 0.15
+    rule_based_bot: 0.5
+
+  # Thresholds for bot detection
+  bot_thresholds:
+    high_anomaly_score: 0.2
+    very_high_anomaly_score: 0.25
+    low_working_hours_ratio: 0.3
+    min_total_downloads: 1000
+    low_entropy_quantile: 0.2
+
+  # Rule-based classification patterns (used by --classification-method rules)
+  # These patterns are used for rule-based classification with pattern matching
+  rule_based:
+    bots:
+      description: >
+        Bot rules: anomalous locations with many users and low or moderate downloads
+        per user. These rules are designed to be stable over time and do not depend
+        on latest-year spikes or 'new location' heuristics.
+      require_anomaly: true
+      patterns:
+        - id: high_users_low_dl
+          description: High user count with very low downloads per user.
+          unique_users:
+            min: 7000
+          downloads_per_user:
+            max: 12
+
+        - id: very_high_users_moderate_dl
+          description: Very high user count with moderate downloads per user.
+          unique_users:
+            min: 25000
+          downloads_per_user:
+            min: 10
+            max: 100
+
+        - id: high_users_moderate_low_dl
+          description: High user count with moderate-low downloads per user.
+          unique_users:
+            min: 15000
+          downloads_per_user:
+            min: 8
+            max: 80
+
+    hubs:
+      description: >
+        Hub rules: anomalous locations with very high downloads per user (mirrors)
+        or high total volume with moderate downloads per user and regular working
+        hours (research institutions).
+      require_anomaly: true
+      patterns:
+        - id: mirrors
+          description: Very high downloads per user (mirrors/single-user hubs).
+          downloads_per_user:
+            min: 500
+
+        - id: research_institutions
+          description: High total downloads with moderate downloads per user and
+            regular working hours.
+          total_downloads:
+            min: 150000
+          downloads_per_user:
+            min: 50
+            max: 500
+          unique_users:
+            min: 1000
+          working_hours_ratio:
+            min: 0.25
+
+    independent_users:
+      description: >
+        Legitimate locations with very few users and very low downloads per user.
+      patterns:
+        - id: low_users_low_dl
+          description: Few users and low downloads per user with low anomaly score.
+          unique_users:
+            max: 5
+          downloads_per_user:
+            max: 3
+          anomaly_score:
+            max: 0.1
+
+    other:
+      description: >
+        Anomalous locations that do not match any BOT or DOWNLOAD_HUB pattern are
+        currently labeled as 'other'. These are candidates for future refinement,
+        e.g. via clustering or LLM-based labeling.
+
+  # ==========================================================================
+  # HIERARCHICAL CLASSIFICATION TAXONOMY
+  # ==========================================================================
+  # This taxonomy classifies download behavior into a hierarchy:
+  #   Level 1: behavior_type (ORGANIC vs AUTOMATED)
+  #   Level 2: automation_category (BOT vs LEGITIMATE_AUTOMATION) - only for AUTOMATED
+  #   Level 3: subcategory (detailed classification)
+  #
+  # The taxonomy is configurable and extensible for different log sources.
+  # ==========================================================================
+
+  taxonomy:
+    name: "pride_download_logs"
+    version: "1.0"
+    description: "Hierarchical classification for PRIDE database download patterns"
+
+  # Level 1: Behavior Type Classification
+  # Distinguishes human-like (organic) from programmatic (automated) behavior
+  behavior_type:
+    organic:
+      description: "Human-like download patterns with irregular timing and working hours activity"
+      # A location is classified as ORGANIC if ANY of these patterns match
+      patterns:
+        - id: working_hours_human
+          description: "Activity concentrated during working hours with irregular patterns"
+          working_hours_ratio:
+            min: 0.4
+          regularity_score:
+            max: 0.6
+
+        - id: irregular_intervals
+          description: "Highly variable download intervals (human-like)"
+          interval_cv:
+            min: 0.7
+
+        - id: low_user_count_organic
+          description: "Few users with moderate activity (individuals/small groups)"
+          unique_users:
+            max: 50
+          downloads_per_user:
+            min: 1
+            max: 200
+
+    automated:
+      description: "Programmatic download patterns with regular timing or high coordination"
+      # A location is classified as AUTOMATED if ANY of these patterns match
+      patterns:
+        - id: high_regularity
+          description: "Very regular download intervals (automated scripts)"
+          regularity_score:
+            min: 0.7
+
+        - id: non_working_hours
+          description: "Activity outside working hours (servers/bots)"
+          working_hours_ratio:
+            max: 0.25
+          night_activity_ratio:
+            min: 0.35
+
+        - id: high_coordination
+          description: "Coordinated multi-user activity (bot farms/automation)"
+          user_coordination_score:
+            min: 0.6
+          unique_users:
+            min: 100
+
+        - id: very_high_volume
+          description: "Extremely high download volume per user (mirrors/automation)"
+          downloads_per_user:
+            min: 500
+
+        - id: many_users_pattern
+          description: "Many users with similar low-activity pattern (bots)"
+          unique_users:
+            min: 1000
+          downloads_per_user:
+            max: 50
+
+  # Level 2: Automation Category Classification (only for behavior_type=AUTOMATED)
+  # Distinguishes suspicious bots from legitimate automation
+  automation_category:
+    bot:
+      description: "Suspicious or malicious automated activity"
+      patterns:
+        - id: many_users_low_dl
+          description: "Many users with suspiciously low downloads per user (bot farm signature)"
+          unique_users:
+            min: 1000
+          downloads_per_user:
+            max: 50
+
+        - id: coordinated_bot_activity
+          description: "Highly coordinated suspicious activity"
+          user_coordination_score:
+            min: 0.7
+          user_authenticity_score:
+            max: 0.4
+
+        - id: ground_truth_bot
+          description: "Definitive bot pattern - extremely many users with minimal activity"
+          unique_users:
+            min: 10000
+          downloads_per_user:
+            max: 10
+
+        - id: suspicious_timing
+          description: "Suspicious timing patterns outside normal hours"
+          night_activity_ratio:
+            min: 0.5
+          unique_users:
+            min: 500
+          working_hours_ratio:
+            max: 0.2
+
+    legitimate_automation:
+      description: "Benign automated systems (mirrors, CI/CD, institutional hubs)"
+      patterns:
+        - id: mirror_pattern
+          description: "Institutional mirror - very high downloads per user, few users"
+          downloads_per_user:
+            min: 500
+          unique_users:
+            max: 100
+
+        - id: institutional_hub_pattern
+          description: "Research institution hub - high volume with working hours activity"
+          total_downloads:
+            min: 100000
+          downloads_per_user:
+            min: 50
+            max: 500
+          working_hours_ratio:
+            min: 0.25
+
+        - id: ci_cd_pattern
+          description: "CI/CD pipeline - few users, high regularity, same files"
+          unique_users:
+            max: 10
+          regularity_score:
+            min: 0.7
+          downloads_per_user:
+            min: 20
+            max: 500
+
+        - id: automated_sync_pattern
+          description: "Automated sync/backup systems"
+          unique_users:
+            max: 5
+          regularity_score:
+            min: 0.6
+          downloads_per_user:
+            min: 50
+
+  # Level 3: Subcategory Classification (detailed categories)
+  subcategories:
+    # ---- ORGANIC subcategories ----
+    individual_user:
+      parent: organic
+      description: "Single researchers or casual users"
+      unique_users:
+        max: 5
+      downloads_per_user:
+        max: 30
+
+    research_group:
+      parent: organic
+      description: "Small academic research teams"
+      unique_users:
+        min: 5
+        max: 50
+      downloads_per_user:
+        min: 10
+        max: 150
+      working_hours_ratio:
+        min: 0.4
+
+    casual_bulk:
+      parent: organic
+      description: "Individual heavy downloaders with human-like patterns"
+      unique_users:
+        max: 5
+      downloads_per_user:
+        min: 50
+        max: 500
+      working_hours_ratio:
+        min: 0.3
+
+    # ---- BOT subcategories ----
+    scraper_bot:
+      parent: bot
+      description: "High-frequency automated scrapers"
+      unique_users:
+        min: 5000
+      downloads_per_user:
+        max: 25
+
+    crawler_bot:
+      parent: bot
+      description: "Systematic crawlers exploring the catalog"
+      unique_users:
+        min: 500
+        max: 5000
+      file_exploration_score:
+        min: 0.6
+
+    coordinated_bot:
+      parent: bot
+      description: "Bot farms with coordinated activity"
+      user_coordination_score:
+        min: 0.7
+      bot_farm_score:
+        min: 0.5
+
+    # ---- LEGITIMATE_AUTOMATION subcategories ----
+    mirror:
+      parent: legitimate_automation
+      description: "Institutional mirrors syncing full datasets"
+      downloads_per_user:
+        min: 500
+      unique_users:
+        max: 10
+
+    institutional_hub:
+      parent: legitimate_automation
+      description: "Research infrastructure hubs serving institutions"
+      downloads_per_user:
+        min: 100
+        max: 1000
+      unique_users:
+        min: 10
+        max: 200
+      working_hours_ratio:
+        min: 0.2
+
+    ci_cd_pipeline:
+      parent: legitimate_automation
+      description: "Automated testing and build systems"
+      unique_users:
+        max: 10
+      downloads_per_user:
+        min: 50
+        max: 500
+      regularity_score:
+        min: 0.7
+      file_diversity_ratio:
+        max: 0.3
+
+    course_workshop:
+      parent: legitimate_automation
+      description: "Educational courses and workshops"
+      unique_users:
+        min: 50
+        max: 500
+      downloads_per_user:
+        min: 5
+        max: 30
+      file_diversity_ratio:
+        max: 0.3
+
+    data_aggregator:
+      parent: legitimate_automation
+      description: "Legitimate data aggregation services"
+      downloads_per_user:
+        min: 200
+      persistence_score:
+        min: 0.5
+      legitimate_automation_score:
+        min: 0.6
+
+  # ==========================================================================
+  # LEGACY CATEGORY RULES (deprecated, kept for backward compatibility)
+  # ==========================================================================
+  # These will be removed in a future version. Use subcategories instead.
+  categories:
+    ci_cd_pipeline:
+      max_users: 10
+      min_downloads_per_user: 50
+      max_downloads_per_user: 500
+      max_file_diversity_ratio: 0.3
+      min_regularity_score: 0.8
+
+    research_group:
+      min_users: 5
+      max_users: 50
+      min_downloads_per_user: 10
+      max_downloads_per_user: 100
+      min_working_hours_ratio: 0.5
+      min_file_diversity_ratio: 0.3
+
+    bulk_downloader:
+      max_users: 5
+      min_downloads_per_user: 100
+      max_downloads_per_user: 1000
+
+    course_workshop:
+      min_users: 50
+      max_users: 500
+      min_downloads_per_user: 5
+      max_downloads_per_user: 20
+      max_file_diversity_ratio: 0.3
+
+# ==========================================================================
+# DEEP RECONCILIATION CONFIGURATION
+# ==========================================================================
+# Configuration for the deep classification reconciliation step.
+# The deep method processes ALL locations through the full pipeline,
+# treating pre-filter output as soft priors rather than hard decisions.
+# A reconciliation step resolves disagreements between pre-filter and pipeline.
+# ==========================================================================
+
+deep_reconciliation:
+  # Pipeline confidence needed to override a prefilter decision
+  override_threshold: 0.7
+  # Stricter bar for overriding obvious_bot → organic (high-risk override)
+  strict_override_threshold: 0.8
+  # Controls the steepness of the sigmoid used for soft prior computation
+  prior_sigmoid_steepness: 5.0
+
