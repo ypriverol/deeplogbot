@@ -599,10 +599,10 @@ def figure_5_concentration(output_dir):
                     ax2.text(j, i, txt, ha='center', va='center',
                              fontsize=5.5, color=color, fontweight='bold')
 
-        ax2.set_title('(B) Top 25 Datasets: Download Consistency', fontsize=11, fontweight='bold', loc='left')
+        ax2.set_title('(B) Top 25 Datasets: Download Consistency', fontsize=11, fontweight='bold', loc='left', pad=15)
     else:
         ax2.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax2.transAxes)
-        ax2.set_title('(B) Top 25 Datasets: Download Consistency', fontsize=11, fontweight='bold', loc='left')
+        ax2.set_title('(B) Top 25 Datasets: Download Consistency', fontsize=11, fontweight='bold', loc='left', pad=15)
 
     # ---- Panel C: Citations vs Downloads (scatter, log-log) ----
     from scipy import stats as sp_stats

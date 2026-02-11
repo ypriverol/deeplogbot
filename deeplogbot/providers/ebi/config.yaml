@@ -180,58 +180,6 @@ automation_category:
         downloads_per_user:
           min: 50
 
-# Level 3: Subcategories - EBI-specific thresholds
-subcategories:
-  # ORGANIC
-  individual_user:
-    parent: organic
-    unique_users:
-      max: 5
-    downloads_per_user:
-      max: 30
-
-  research_group:
-    parent: organic
-    unique_users:
-      min: 5
-      max: 50
-    working_hours_ratio:
-      min: 0.35
-    downloads_per_user:
-      max: 100
-
-  # BOT
-  generic_bot:
-    parent: bot
-    description: "Automated bot traffic (fallback for all bot-classified locations)"
-
-  # LEGITIMATE_AUTOMATION
-  mirror:
-    parent: legitimate_automation
-    downloads_per_user:
-      min: 500
-    unique_users:
-      max: 10
-
-  ci_cd_pipeline:
-    parent: legitimate_automation
-    unique_users:
-      max: 10
-    regularity_score:
-      min: 0.7
-
-  course_workshop:
-    parent: legitimate_automation
-    description: "Bioinformatics courses and workshops downloading PRIDE data"
-    unique_users:
-      min: 20
-      max: 200
-    downloads_per_user:
-      min: 3
-      max: 30
-    working_hours_ratio:
-      min: 0.4
-
 # =============================================================================
 # CLASSIFICATION RULES (for rule-based method)
 # =============================================================================

@@ -7,7 +7,7 @@ with its own:
 - Schema: Field mappings for the log format
 - Config: Classification thresholds and rules
 - Feature Extractors: Custom feature extraction logic
-- Taxonomy: Category definitions and subcategories
+- Taxonomy: Category definitions (bot, hub, organic)
 
 Usage:
     from deeplogbot.providers import get_provider, list_providers, register_provider
@@ -95,19 +95,6 @@ class ProviderConfig:
         taxonomy = self.get_taxonomy()
         return taxonomy.get('automation_category', {})
 
-    def get_subcategory_rules(self) -> Dict[str, Any]:
-        """Get subcategory classification rules."""
-        taxonomy = self.get_taxonomy()
-        return taxonomy.get('subcategories', {})
-
-    def get_subcategories_by_parent(self, parent: str) -> Dict[str, Any]:
-        """Get subcategories for a specific parent category."""
-        subcategories = self.get_subcategory_rules()
-        return {
-            name: rules for name, rules in subcategories.items()
-            if rules.get('parent') == parent
-        }
-
     def get_rule_based_config(self) -> Dict[str, Any]:
         """Get rule-based classification config."""
         config = self.get_config()
@@ -152,7 +139,7 @@ def _merge_taxonomy(provider_config: Dict[str, Any]) -> Dict[str, Any]:
 
     # Merge each taxonomy section
     merged = base.copy()
-    for section in ['taxonomy', 'behavior_type', 'automation_category', 'subcategories',
+    for section in ['taxonomy', 'behavior_type', 'automation_category',
                     'required_features', 'derived_columns']:
         if section in provider_config:
             if section in merged:

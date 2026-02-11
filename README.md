@@ -12,23 +12,13 @@ DeepLogBot (CLI: `deeplogbot`) detects and classifies download patterns in scien
 
 Applied to the PRIDE Archive (159M download records), the system identified that **88% of traffic is bot-generated**. After filtering, **19.1M clean downloads** remain across 34,085 datasets and 213 countries.
 
-### Hierarchical Classification Taxonomy
+### Classification Categories
 
-```
-behavior_type (Level 1)
-├── ORGANIC
-│   ├── individual_user
-│   └── research_group
-│
-└── AUTOMATED
-    ├── BOT
-    │   └── generic_bot
-    │
-    └── LEGITIMATE_AUTOMATION (Hub)
-        ├── mirror
-        ├── ci_cd_pipeline
-        └── course_workshop
-```
+Each geographic location is classified into one of three categories:
+
+- **Bot** — Automated scrapers, crawlers, and coordinated bot farms
+- **Hub** — Legitimate automation: institutional mirrors, CI/CD pipelines, educational workshops
+- **Organic** — Human researchers with natural download patterns
 
 ## Classification Methods
 
@@ -59,7 +49,7 @@ Additional components:
 - **Soft priors** — Pre-filter signals encoded as continuous features (no hard lockout)
 - **Reconciliation** — Override thresholds for cases where pipeline and pre-filter disagree
 - **Hub protection** — Prevent legitimate automation from being classified as bots
-- **Post-classification** — Detailed subcategory assignment
+- **Post-classification** — Hub protection and final label assignment
 
 ## Installation
 
@@ -153,7 +143,7 @@ deeplogbot/
 │       ├── organic_vae.py       # VAE + Deep Isolation Forest
 │       ├── temporal_consistency.py # Modified z-score spike detection
 │       ├── fusion.py            # Gradient-boosted meta-learner
-│       ├── post_classification.py # Hub protection & subcategory assignment
+│       ├── post_classification.py # Hub protection & label finalization
 │       └── feature_validation.py  # Feature usage validation
 │
 ├── reports/                     # Output generation
@@ -249,7 +239,7 @@ conn = duckdb.connect()
 df = conn.execute("""
     SELECT accession, country, year,
            is_bot, is_hub, is_organic,
-           behavior_type, automation_category, subcategory
+           is_bot, is_hub, is_organic
     FROM read_parquet('output/downloads_annotated.parquet')
     LIMIT 10
 """).df()
@@ -273,9 +263,6 @@ The annotated output parquet contains:
 | `is_bot` | Bot classification flag |
 | `is_hub` | Download hub classification flag |
 | `is_organic` | Organic user classification flag |
-| `behavior_type` | `organic` or `automated` |
-| `automation_category` | `bot` or `legitimate_automation` |
-| `subcategory` | Detailed category (e.g., `mirror`, `generic_bot`) |
 | `classification_confidence` | Confidence score (0-1) |
 
 Reports generated:

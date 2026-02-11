@@ -8,7 +8,7 @@ import tempfile
 
 from .utils import logger, format_number
 from .features.providers.ebi import extract_location_features
-from .config import FEATURE_COLUMNS, APP_CONFIG, HUB_SUBCATEGORIES
+from .config import FEATURE_COLUMNS, APP_CONFIG
 from .models import (
     train_isolation_forest,
     compute_feature_importances,
@@ -382,7 +382,7 @@ def run_bot_annotator(
                 # Get all feature columns
                 all_feature_cols = [col for col in analysis_df.columns
                                    if col not in ['geo_location', 'country', 'city', 'user_category',
-                                                 'behavior_type', 'automation_category', 'subcategory',
+                                                 'behavior_type', 'automation_category',
                                                  'classification_confidence', 'needs_review',
                                                  'time_series_features', 'is_anomaly', 'anomaly_score']]
                 
@@ -420,11 +420,12 @@ def run_bot_annotator(
         else:
             bot_locs = pd.DataFrame()
         
-        if 'subcategory' in analysis_df.columns:
-            hub_locs = analysis_df[analysis_df['subcategory'].isin(HUB_SUBCATEGORIES)].copy()
+        if 'is_hub' in analysis_df.columns:
+            hub_locs = analysis_df[analysis_df['is_hub']].copy()
         elif 'is_download_hub' in analysis_df.columns:
-            # Fallback to legacy column if hierarchical not available
             hub_locs = analysis_df[analysis_df['is_download_hub']].copy()
+        elif 'automation_category' in analysis_df.columns:
+            hub_locs = analysis_df[analysis_df['automation_category'] == 'legitimate_automation'].copy()
         else:
             hub_locs = pd.DataFrame()
         
@@ -509,7 +510,7 @@ def run_bot_annotator(
             
             # Pass location_df for hierarchical columns (both rules and deep methods now support hierarchical)
             # Check if hierarchical columns exist
-            has_hierarchical = all(col in analysis_df.columns for col in ['behavior_type', 'automation_category', 'subcategory'])
+            has_hierarchical = all(col in analysis_df.columns for col in ['behavior_type', 'automation_category'])
             location_df_for_annotation = analysis_df if has_hierarchical else None
             annotated_file = annotate_downloads(conn, actual_input_parquet, output_parquet,
                                                 bot_locs, hub_locs, output_dir,
@@ -538,8 +539,10 @@ def run_bot_annotator(
             else:
                 bot_mask = pd.Series(False, index=analysis_df.index)
             
-            if 'subcategory' in analysis_df.columns:
-                hub_mask = analysis_df['subcategory'].isin(HUB_SUBCATEGORIES)
+            if 'is_hub' in analysis_df.columns:
+                hub_mask = analysis_df['is_hub']
+            elif 'automation_category' in analysis_df.columns:
+                hub_mask = analysis_df['automation_category'] == 'legitimate_automation'
             elif 'is_download_hub' in analysis_df.columns:
                 hub_mask = analysis_df['is_download_hub']
             else:

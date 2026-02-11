@@ -355,34 +355,6 @@ def get_bot_thresholds() -> dict:
     })
 
 
-def get_category_rules() -> dict:
-    """Get category detection rules from config."""
-    return get_classification_config().get('categories', {
-        'ci_cd_pipeline': {
-            'max_users': 10,
-            'min_downloads_per_user': 50,
-            'max_downloads_per_user': 500,
-            'max_file_diversity_ratio': 0.3,
-            'min_regularity_score': 0.8,
-        },
-        'research_group': {
-            'min_users': 5,
-            'max_users': 50,
-            'min_downloads_per_user': 10,
-            'max_downloads_per_user': 100,
-            'min_working_hours_ratio': 0.5,
-            'min_file_diversity_ratio': 0.3,
-        },
-        'course_workshop': {
-            'min_users': 50,
-            'max_users': 500,
-            'min_downloads_per_user': 5,
-            'max_downloads_per_user': 20,
-            'max_file_diversity_ratio': 0.3,
-        },
-    })
-
-
 def get_deep_reconciliation_config() -> dict:
     """Get deep classification reconciliation configuration."""
     return APP_CONFIG.get('deep_reconciliation', {
@@ -529,99 +501,6 @@ def get_automation_category_rules(use_provider: bool = True) -> dict:
     return get_classification_config().get('automation_category', default_rules)
 
 
-def get_subcategory_rules(use_provider: bool = True) -> dict:
-    """
-    Get Level 3 subcategory classification rules.
-
-    Returns all subcategory rules with their parent category relationships.
-    Each subcategory has a 'parent' field indicating which behavior_type or
-    automation_category it belongs to.
-
-    Args:
-        use_provider: If True, use active provider's rules. If False, use legacy config.
-    """
-    default_rules = {
-        'individual_user': {
-            'parent': 'organic',
-            'description': 'Single researchers or casual users',
-            'unique_users': {'max': 5},
-            'downloads_per_user': {'max': 30}
-        },
-        'research_group': {
-            'parent': 'organic',
-            'description': 'Small academic research teams',
-            'unique_users': {'min': 5, 'max': 50},
-            'downloads_per_user': {'min': 10, 'max': 150}
-        },
-        'mirror': {
-            'parent': 'legitimate_automation',
-            'description': 'Institutional mirrors',
-            'downloads_per_user': {'min': 500}
-        },
-        'generic_bot': {
-            'parent': 'bot',
-            'description': 'Bot that doesn\'t match specific subcategories',
-        }
-    }
-
-    if use_provider:
-        try:
-            taxonomy = get_provider_taxonomy()
-            return taxonomy.get('subcategories', default_rules)
-        except Exception:
-            pass
-
-    return get_classification_config().get('subcategories', default_rules)
-
-
-def get_organic_subcategory_rules() -> dict:
-    """Get subcategory rules for ORGANIC behavior type."""
-    all_subcategories = get_subcategory_rules()
-    return {
-        name: rules for name, rules in all_subcategories.items()
-        if rules.get('parent') == 'organic'
-    }
-
-
-def get_bot_subcategory_rules() -> dict:
-    """Get subcategory rules for BOT automation category."""
-    all_subcategories = get_subcategory_rules()
-    return {
-        name: rules for name, rules in all_subcategories.items()
-        if rules.get('parent') == 'bot'
-    }
-
-
-def get_legitimate_automation_subcategory_rules() -> dict:
-    """Get subcategory rules for LEGITIMATE_AUTOMATION category."""
-    all_subcategories = get_subcategory_rules()
-    return {
-        name: rules for name, rules in all_subcategories.items()
-        if rules.get('parent') == 'legitimate_automation'
-    }
-
-
-def get_subcategories_by_parent(parent: str) -> dict:
-    """
-    Get subcategory rules filtered by parent category.
-
-    Args:
-        parent: Parent category name ('organic', 'bot', 'legitimate_automation')
-
-    Returns:
-        Dict of subcategory rules where parent matches
-    """
-    all_subcategories = get_subcategory_rules()
-    return {
-        name: rules for name, rules in all_subcategories.items()
-        if rules.get('parent') == parent
-    }
-
-
-# Canonical set of hub subcategories — import this instead of hardcoding
-HUB_SUBCATEGORIES = frozenset({'mirror', 'ci_cd_pipeline', 'course_workshop'})
-
-
 def get_hierarchical_classification_config() -> dict:
     """
     Get the complete hierarchical classification configuration.
@@ -630,11 +509,9 @@ def get_hierarchical_classification_config() -> dict:
     - taxonomy: Metadata about the taxonomy
     - behavior_type: Level 1 rules (organic vs automated)
     - automation_category: Level 2 rules (bot vs legitimate_automation)
-    - subcategories: Level 3 rules (detailed categories)
     """
     return {
         'taxonomy': get_taxonomy_info(),
         'behavior_type': get_behavior_type_rules(),
         'automation_category': get_automation_category_rules(),
-        'subcategories': get_subcategory_rules(),
     }

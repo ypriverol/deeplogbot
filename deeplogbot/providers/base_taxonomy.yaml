@@ -4,11 +4,11 @@
 # This file defines the base taxonomy structure for classifying download behavior.
 # Providers can extend or override these definitions in their own config.yaml.
 #
-# The taxonomy has three levels:
-#   Level 1: behavior_type (ORGANIC vs AUTOMATED)
-#   Level 2: automation_category (BOT vs LEGITIMATE_AUTOMATION) - only for AUTOMATED
-#   Level 3: subcategory (detailed classification)
+# The taxonomy has two stages:
+#   Stage 1: behavior_type (ORGANIC vs AUTOMATED)
+#   Stage 2: automation_category (BOT vs LEGITIMATE_AUTOMATION) - only for AUTOMATED
 #
+# Final output: is_bot, is_hub, is_organic boolean columns.
 # Each provider should define thresholds appropriate for their data scale.
 # =============================================================================
 
@@ -180,68 +180,6 @@ automation_category:
           min: 50
 
 # =============================================================================
-# LEVEL 3: SUBCATEGORIES
-# =============================================================================
-# Detailed classification within each parent category.
-# Providers can add custom subcategories specific to their domain.
-
-subcategories:
-  # ---- ORGANIC subcategories ----
-  individual_user:
-    parent: organic
-    description: "Single researchers or casual users"
-    unique_users:
-      max: 5
-    downloads_per_user:
-      max: 30
-
-  research_group:
-    parent: organic
-    description: "Small academic teams (5-50 users)"
-    unique_users:
-      min: 5
-      max: 50
-    working_hours_ratio:
-      min: 0.35
-    downloads_per_user:
-      max: 100
-
-  # ---- BOT subcategories ----
-  generic_bot:
-    parent: bot
-    description: "Bot that doesn't match specific subcategories"
-    # Fallback for bots not matching other patterns
-
-  # ---- LEGITIMATE_AUTOMATION subcategories ----
-  mirror:
-    parent: legitimate_automation
-    description: "Institutional mirrors syncing full datasets"
-    downloads_per_user:
-      min: 500
-    unique_users:
-      max: 100
-
-  ci_cd_pipeline:
-    parent: legitimate_automation
-    description: "Automated testing and build systems"
-    unique_users:
-      max: 10
-    regularity_score:
-      min: 0.7
-
-  course_workshop:
-    parent: legitimate_automation
-    description: "Educational courses and workshops"
-    unique_users:
-      min: 20
-      max: 200
-    downloads_per_user:
-      min: 3
-      max: 30
-    working_hours_ratio:
-      min: 0.4
-
-# =============================================================================
 # FEATURE REQUIREMENTS
 # =============================================================================
 # Lists the features required for classification.
@@ -272,11 +210,8 @@ required_features:
 
 derived_columns:
   is_bot:
-    description: "True if automation_category == 'bot'"
-    condition: "automation_category == 'bot'"
-  is_download_hub:
-    description: "True if subcategory in hub types"
-    hub_subcategories:
-      - mirror
-      - ci_cd_pipeline
-      - course_workshop
+    description: "True if classified as bot"
+  is_hub:
+    description: "True if classified as hub (legitimate automation)"
+  is_organic:
+    description: "True if classified as organic"
