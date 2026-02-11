@@ -201,7 +201,9 @@ subcategories:
       max: 100
 
   # BOT
-  # (All bots get the 'generic_bot' fallback subcategory)
+  generic_bot:
+    parent: bot
+    description: "Automated bot traffic (fallback for all bot-classified locations)"
 
   # LEGITIMATE_AUTOMATION
   mirror:

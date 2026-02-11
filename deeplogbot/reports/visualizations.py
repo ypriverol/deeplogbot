@@ -15,6 +15,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+from ..config import HUB_SUBCATEGORIES
 from ..utils import logger
 
 # Try to import plotting libraries
@@ -59,9 +60,6 @@ AUTOMATION_CATEGORY_COLORS = {
     'bot': '#e74c3c',
     'legitimate_automation': '#3498db',
 }
-
-# Hub subcategories for classification
-HUB_SUBCATEGORIES = {'mirror', 'ci_cd_pipeline', 'course_workshop'}
 
 
 def get_classification_masks(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:

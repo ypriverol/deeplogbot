@@ -13,6 +13,8 @@ from typing import Dict, Any, List
 import pandas as pd
 import numpy as np
 
+from ..config import HUB_SUBCATEGORIES
+
 
 class StatisticsCalculator:
     """Calculate comprehensive statistics for bot detection analysis."""
@@ -63,9 +65,8 @@ class StatisticsCalculator:
                 ) if self.df['total_downloads'].sum() > 0 else 0
 
         # Hub statistics (using hierarchical classification)
-        hub_subcategories = {'mirror', 'ci_cd_pipeline', 'course_workshop'}
         if 'subcategory' in self.df.columns:
-            hub_mask = self.df['subcategory'].isin(hub_subcategories)
+            hub_mask = self.df['subcategory'].isin(HUB_SUBCATEGORIES)
             stats['hub_locations'] = int(hub_mask.sum())
             stats['hub_percentage'] = round(hub_mask.mean() * 100, 2)
             if 'total_downloads' in self.df.columns:

@@ -8,7 +8,7 @@ import tempfile
 
 from .utils import logger, format_number
 from .features.providers.ebi import extract_location_features
-from .config import FEATURE_COLUMNS, APP_CONFIG
+from .config import FEATURE_COLUMNS, APP_CONFIG, HUB_SUBCATEGORIES
 from .models import (
     train_isolation_forest,
     compute_feature_importances,
@@ -420,9 +420,8 @@ def run_bot_annotator(
         else:
             bot_locs = pd.DataFrame()
         
-        hub_subcategories = {'mirror', 'ci_cd_pipeline', 'course_workshop'}
         if 'subcategory' in analysis_df.columns:
-            hub_locs = analysis_df[analysis_df['subcategory'].isin(hub_subcategories)].copy()
+            hub_locs = analysis_df[analysis_df['subcategory'].isin(HUB_SUBCATEGORIES)].copy()
         elif 'is_download_hub' in analysis_df.columns:
             # Fallback to legacy column if hierarchical not available
             hub_locs = analysis_df[analysis_df['is_download_hub']].copy()
@@ -539,9 +538,8 @@ def run_bot_annotator(
             else:
                 bot_mask = pd.Series(False, index=analysis_df.index)
             
-            hub_subcategories = {'mirror', 'ci_cd_pipeline', 'course_workshop'}
             if 'subcategory' in analysis_df.columns:
-                hub_mask = analysis_df['subcategory'].isin(hub_subcategories)
+                hub_mask = analysis_df['subcategory'].isin(HUB_SUBCATEGORIES)
             elif 'is_download_hub' in analysis_df.columns:
                 hub_mask = analysis_df['is_download_hub']
             else:
