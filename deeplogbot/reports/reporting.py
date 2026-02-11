@@ -5,7 +5,7 @@ import pandas as pd
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
-from ..utils import logger, format_number, group_nearby_locations_with_llm
+from ..utils import logger, format_number, group_nearby_locations
 from ..features.providers.ebi import LogSchema
 
 
@@ -229,7 +229,7 @@ class ReportGenerator:
         """Write hub locations section."""
         # Group nearby hub locations by geographic proximity
         logger.info("Grouping nearby hub locations for consolidated view...")
-        location_groups = group_nearby_locations_with_llm(
+        location_groups = group_nearby_locations(
             hub_locs.copy(),
             max_distance_km=10,
         )
@@ -461,7 +461,7 @@ class ReportGenerator:
             
             f.write("METHODOLOGY\n")
             f.write("-" * 60 + "\n")
-            f.write("Algorithm: Isolation Forest (unsupervised anomaly detection)\n\n")
+            f.write("Algorithm: Isolation Forest anomaly detection + hierarchical classification\n\n")
             self._write_feature_list(f, available_features)
             self._write_classification_rules(f, classification_method)
             self._write_transformer_explanation(f, classification_method) # New call here

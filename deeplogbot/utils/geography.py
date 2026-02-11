@@ -50,7 +50,7 @@ def parse_geo_location(geo_loc_str: Optional[str]) -> Tuple[Optional[float], Opt
         return None, None
 
 
-def group_nearby_locations_with_llm(hub_locations: pd.DataFrame, max_distance_km: int = 10, **kwargs) -> Dict[str, str]:
+def group_nearby_locations(hub_locations: pd.DataFrame, max_distance_km: int = 10, **kwargs) -> Dict[str, str]:
     """
     Group nearby hub locations using geographic distance.
 

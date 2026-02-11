@@ -42,12 +42,12 @@ def format_number(num):
 
 
 # Geographic utilities
-from .geography import haversine_distance, parse_geo_location, group_nearby_locations_with_llm
+from .geography import haversine_distance, parse_geo_location, group_nearby_locations
 
 __all__ = [
     "logger",
     "format_number",
     "haversine_distance",
     "parse_geo_location",
-    "group_nearby_locations_with_llm",
+    "group_nearby_locations",
 ]

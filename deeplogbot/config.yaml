@@ -183,8 +183,7 @@ classification:
     other:
       description: >
         Anomalous locations that do not match any BOT or DOWNLOAD_HUB pattern are
-        currently labeled as 'other'. These are candidates for future refinement,
-        e.g. via clustering or LLM-based labeling.
+        currently labeled as 'other'. These are candidates for future refinement.
 
   # ==========================================================================
   # HIERARCHICAL CLASSIFICATION TAXONOMY

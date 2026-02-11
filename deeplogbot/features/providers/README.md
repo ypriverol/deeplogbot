@@ -115,34 +115,22 @@ df = extract_location_features_ebi(conn, 'path/to/data.parquet')
 
 ---
 
-## Feature Selection for ML Methods
+## Feature Usage by Classification Method
 
 ### Rules Method
-- Uses all features implicitly through rule conditions
+- Uses all features implicitly through YAML-configurable rule conditions
 - Also uses `anomaly_score` from Isolation Forest
-- Total: ~33 features available
 
-### ML Supervised Method
-- Uses all 21 core features from `feature_columns` list
-- Trains RandomForestClassifier on these features
-
-### ML Unsupervised Method
-- Uses 8 key features selected for discriminative power:
-  1. `unique_users`
-  2. `downloads_per_user`
-  3. `anomaly_score`
-  4. `fraction_latest_year`
-  5. `spike_ratio`
-  6. `hourly_entropy`
-  7. `working_hours_ratio`
-  8. `users_per_active_hour`
+### Deep Method
+- Uses all features plus ~40 additional behavioral and discriminative features
+- Multi-stage pipeline: seed selection, Organic VAE, Deep Isolation Forest, temporal consistency, fusion
 
 ---
 
 ## Notes
 
 - All features are computed at the **location level** (geo_location + country)
-- Locations must have at least 100 downloads to be included
+- By default, all locations are included (minimum 1 download); use `--min-location-downloads` to filter
 - Features are designed to distinguish bots (many users, low DL/user) from hubs (few users, high DL/user)
 - Country-level features help detect coordinated bot activity across multiple locations in the same country
 
