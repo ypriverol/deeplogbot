@@ -13,7 +13,6 @@ from typing import Dict, Any, List
 import pandas as pd
 import numpy as np
 
-from ..config import HUB_SUBCATEGORIES
 
 
 class StatisticsCalculator:
@@ -64,16 +63,21 @@ class StatisticsCalculator:
                     stats['bot_downloads'] / self.df['total_downloads'].sum() * 100, 2
                 ) if self.df['total_downloads'].sum() > 0 else 0
 
-        # Hub statistics (using hierarchical classification)
-        if 'subcategory' in self.df.columns:
-            hub_mask = self.df['subcategory'].isin(HUB_SUBCATEGORIES)
-            stats['hub_locations'] = int(hub_mask.sum())
-            stats['hub_percentage'] = round(hub_mask.mean() * 100, 2)
-            if 'total_downloads' in self.df.columns:
-                stats['hub_downloads'] = int(self.df.loc[hub_mask, 'total_downloads'].sum())
-                stats['hub_downloads_percentage'] = round(
-                    stats['hub_downloads'] / self.df['total_downloads'].sum() * 100, 2
-                ) if self.df['total_downloads'].sum() > 0 else 0
+        # Hub statistics
+        if 'is_hub' in self.df.columns:
+            hub_mask = self.df['is_hub']
+        elif 'automation_category' in self.df.columns:
+            hub_mask = self.df['automation_category'] == 'legitimate_automation'
+        else:
+            hub_mask = pd.Series(False, index=self.df.index)
+
+        stats['hub_locations'] = int(hub_mask.sum())
+        stats['hub_percentage'] = round(hub_mask.mean() * 100, 2)
+        if 'total_downloads' in self.df.columns and hub_mask.any():
+            stats['hub_downloads'] = int(self.df.loc[hub_mask, 'total_downloads'].sum())
+            stats['hub_downloads_percentage'] = round(
+                stats['hub_downloads'] / self.df['total_downloads'].sum() * 100, 2
+            ) if self.df['total_downloads'].sum() > 0 else 0
 
         # User category breakdown (for deep method)
         if 'user_category' in self.df.columns:
@@ -123,25 +127,6 @@ class StatisticsCalculator:
                         ac: int(automated_df[automated_df['automation_category'] == ac]['total_downloads'].sum())
                         for ac in ac_counts.keys()
                     }
-
-        # Level 3: Subcategories
-        if 'subcategory' in self.df.columns:
-            subcat_counts = self.df['subcategory'].value_counts().to_dict()
-            stats['subcategory'] = {
-                'counts': subcat_counts,
-                'percentages': {k: round(v / total * 100, 2) for k, v in subcat_counts.items()},
-            }
-
-            # Group by parent
-            stats['subcategory']['by_parent'] = {}
-            for parent in ['organic', 'bot', 'legitimate_automation']:
-                if parent in ['organic']:
-                    parent_df = self.df[self.df['behavior_type'] == parent]
-                else:
-                    parent_df = self.df[self.df['automation_category'] == parent]
-
-                if len(parent_df) > 0 and 'subcategory' in parent_df.columns:
-                    stats['subcategory']['by_parent'][parent] = parent_df['subcategory'].value_counts().to_dict()
 
         return stats
 

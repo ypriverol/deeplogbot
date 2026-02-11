@@ -1,10 +1,7 @@
 """Annotation utilities for marking bot and download hub locations.
 
 This module provides functions to annotate download logs with classification
-information using the hierarchical taxonomy:
-  - behavior_type: 'organic' | 'automated'
-  - automation_category: 'bot' | 'legitimate_automation' | None
-  - subcategory: detailed classification
+columns: is_bot, is_hub, is_organic.
 """
 
 import os
@@ -22,10 +19,7 @@ def annotate_downloads(conn, input_parquet, output_parquet,
     """
     Annotate the parquet file with classification columns.
 
-    Adds hierarchical classification columns:
-      - behavior_type: 'organic' | 'automated'
-      - automation_category: 'bot' | 'legitimate_automation' | None
-      - subcategory: detailed classification
+    Adds classification columns: is_bot, is_hub, is_organic.
 
     Args:
         conn: DuckDB connection
@@ -90,12 +84,11 @@ def annotate_downloads(conn, input_parquet, output_parquet,
     has_hierarchical = (
         location_df is not None and
         'behavior_type' in location_df.columns and
-        'automation_category' in location_df.columns and
-        'subcategory' in location_df.columns
+        'automation_category' in location_df.columns
     )
 
     if has_hierarchical:
-        logger.info("  Using hierarchical classification (behavior_type, automation_category, subcategory)")
+        logger.info("  Using hierarchical classification (is_bot, is_hub, is_organic)")
         annotation_query = _build_hierarchical_annotation_query(
             escaped_input, location_df, temp_dir
         )
@@ -149,17 +142,9 @@ def _build_legacy_annotation_query(escaped_input: str, bot_locations: pd.DataFra
     )
     SELECT
         d.*,
-        CASE WHEN bl.geo_location IS NOT NULL OR hl.geo_location IS NOT NULL THEN 'automated' ELSE 'organic' END as behavior_type,
-        CASE
-            WHEN bl.geo_location IS NOT NULL THEN 'bot'
-            WHEN hl.geo_location IS NOT NULL THEN 'legitimate_automation'
-            ELSE NULL
-        END as automation_category,
-        CASE
-            WHEN bl.geo_location IS NOT NULL THEN 'generic_bot'
-            WHEN hl.geo_location IS NOT NULL THEN 'mirror'
-            ELSE 'individual_user'
-        END as subcategory
+        CASE WHEN bl.geo_location IS NOT NULL THEN true ELSE false END as is_bot,
+        CASE WHEN hl.geo_location IS NOT NULL THEN true ELSE false END as is_hub,
+        CASE WHEN bl.geo_location IS NULL AND hl.geo_location IS NULL THEN true ELSE false END as is_organic
     FROM read_parquet('{escaped_input}') d
     LEFT JOIN bot_locs bl ON d.geo_location = bl.geo_location
     LEFT JOIN hub_locs hl ON d.geo_location = hl.geo_location
@@ -169,8 +154,15 @@ def _build_legacy_annotation_query(escaped_input: str, bot_locations: pd.DataFra
 def _build_hierarchical_annotation_query(escaped_input: str, location_df: pd.DataFrame,
                                           temp_dir: str) -> str:
     """Build annotation query using full hierarchical classification."""
+    # Derive boolean columns if not already present
+    if 'is_bot' not in location_df.columns:
+        location_df = location_df.copy()
+        location_df['is_bot'] = location_df.get('automation_category', pd.Series(dtype=str)) == 'bot'
+        location_df['is_hub'] = location_df.get('automation_category', pd.Series(dtype=str)) == 'legitimate_automation'
+        location_df['is_organic'] = location_df.get('behavior_type', pd.Series(dtype=str)) == 'organic'
+
     # Select only the columns we need for annotation
-    annotation_cols = ['geo_location', 'behavior_type', 'automation_category', 'subcategory']
+    annotation_cols = ['geo_location', 'is_bot', 'is_hub', 'is_organic']
     available_cols = [col for col in annotation_cols if col in location_df.columns]
 
     # Create classification DataFrame
@@ -185,16 +177,16 @@ def _build_hierarchical_annotation_query(escaped_input: str, location_df: pd.Dat
     WITH classification AS (
         SELECT
             geo_location,
-            behavior_type,
-            automation_category,
-            subcategory
+            is_bot,
+            is_hub,
+            is_organic
         FROM read_parquet('{escaped_classification}')
     )
     SELECT
         d.*,
-        COALESCE(c.behavior_type, 'organic') as behavior_type,
-        c.automation_category as automation_category,
-        COALESCE(c.subcategory, 'individual_user') as subcategory
+        COALESCE(c.is_bot, false) as is_bot,
+        COALESCE(c.is_hub, false) as is_hub,
+        COALESCE(c.is_organic, true) as is_organic
     FROM read_parquet('{escaped_input}') d
     LEFT JOIN classification c ON d.geo_location = c.geo_location
     """

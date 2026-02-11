@@ -15,7 +15,6 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from ..config import HUB_SUBCATEGORIES
 from ..utils import logger
 
 # Try to import plotting libraries
@@ -75,9 +74,11 @@ def get_classification_masks(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
     else:
         bot_mask = pd.Series(False, index=df.index)
 
-    # Hub mask: subcategory in hub subcategories
-    if 'subcategory' in df.columns:
-        hub_mask = df['subcategory'].isin(HUB_SUBCATEGORIES)
+    # Hub mask
+    if 'is_hub' in df.columns:
+        hub_mask = df['is_hub']
+    elif 'automation_category' in df.columns:
+        hub_mask = df['automation_category'] == 'legitimate_automation'
     else:
         hub_mask = pd.Series(False, index=df.index)
 
@@ -147,22 +148,24 @@ class VisualizationGenerator:
                        autopct='%1.1f%%', colors=colors, startangle=90)
             axes[0].set_title('Level 1: Behavior Type Distribution', fontsize=12, fontweight='bold')
 
-            # Right: Subcategory bar chart
-            if 'subcategory' in df.columns:
-                subcat_counts = df['subcategory'].value_counts().head(10)
-                colors = [CATEGORY_COLORS.get(sc, '#95a5a6') for sc in subcat_counts.index]
-                bars = axes[1].barh(range(len(subcat_counts)), subcat_counts.values, color=colors)
-                axes[1].set_yticks(range(len(subcat_counts)))
-                axes[1].set_yticklabels(subcat_counts.index)
-                axes[1].set_xlabel('Number of Locations')
-                axes[1].set_title('Level 3: Top Subcategories', fontsize=12, fontweight='bold')
-                axes[1].invert_yaxis()
+            # Right: Automation category bar chart (for automated locations)
+            if 'automation_category' in df.columns:
+                automated_df = df[df['behavior_type'] == 'automated']
+                if len(automated_df) > 0:
+                    ac_counts = automated_df['automation_category'].value_counts()
+                    colors = [AUTOMATION_CATEGORY_COLORS.get(ac, '#95a5a6') for ac in ac_counts.index]
+                    bars = axes[1].barh(range(len(ac_counts)), ac_counts.values, color=colors)
+                    axes[1].set_yticks(range(len(ac_counts)))
+                    axes[1].set_yticklabels([c.upper().replace('_', ' ') for c in ac_counts.index])
+                    axes[1].set_xlabel('Number of Locations')
+                    axes[1].set_title('Level 2: Automation Categories', fontsize=12, fontweight='bold')
+                    axes[1].invert_yaxis()
 
-                # Add count labels
-                for bar, count in zip(bars, subcat_counts.values):
-                    axes[1].text(bar.get_width() + max(subcat_counts.values) * 0.01,
-                                bar.get_y() + bar.get_height()/2,
-                                f'{count:,}', va='center', fontsize=9)
+                    # Add count labels
+                    for bar, count in zip(bars, ac_counts.values):
+                        axes[1].text(bar.get_width() + max(ac_counts.values) * 0.01,
+                                    bar.get_y() + bar.get_height()/2,
+                                    f'{count:,}', va='center', fontsize=9)
         else:
             # Use hierarchical classification
             categories = []

@@ -231,8 +231,8 @@ paper/*.fls
 paper/*.fdb_latexmk
 paper/*.fls
 config/llm_configs/gemini_service_account.json
-models/
-checkpoints/
+/models/
+/checkpoints/
 pride_data/
 
 # Paper artifacts (non-manuscript)

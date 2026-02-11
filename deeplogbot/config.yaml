@@ -188,12 +188,11 @@ classification:
   # ==========================================================================
   # HIERARCHICAL CLASSIFICATION TAXONOMY
   # ==========================================================================
-  # This taxonomy classifies download behavior into a hierarchy:
-  #   Level 1: behavior_type (ORGANIC vs AUTOMATED)
-  #   Level 2: automation_category (BOT vs LEGITIMATE_AUTOMATION) - only for AUTOMATED
-  #   Level 3: subcategory (detailed classification)
+  # This taxonomy classifies download behavior in two stages:
+  #   Stage 1: behavior_type (ORGANIC vs AUTOMATED)
+  #   Stage 2: automation_category (BOT vs LEGITIMATE_AUTOMATION) - only for AUTOMATED
   #
-  # The taxonomy is configurable and extensible for different log sources.
+  # Final output: is_bot, is_hub, is_organic boolean columns.
   # ==========================================================================
 
   taxonomy:
@@ -337,94 +336,6 @@ classification:
             min: 0.6
           downloads_per_user:
             min: 50
-
-  # Level 3: Subcategory Classification (detailed categories)
-  subcategories:
-    # ---- ORGANIC subcategories ----
-    individual_user:
-      parent: organic
-      description: "Single researchers or casual users"
-      unique_users:
-        max: 5
-      downloads_per_user:
-        max: 30
-
-    research_group:
-      parent: organic
-      description: "Small academic research teams"
-      unique_users:
-        min: 5
-        max: 50
-      downloads_per_user:
-        min: 10
-        max: 150
-      working_hours_ratio:
-        min: 0.4
-
-    # ---- BOT subcategories ----
-    generic_bot:
-      parent: bot
-      description: "Automated bot traffic (fallback for all bot-classified locations)"
-
-    # ---- LEGITIMATE_AUTOMATION subcategories ----
-    mirror:
-      parent: legitimate_automation
-      description: "Institutional mirrors syncing full datasets"
-      downloads_per_user:
-        min: 500
-      unique_users:
-        max: 10
-
-    ci_cd_pipeline:
-      parent: legitimate_automation
-      description: "Automated testing and build systems"
-      unique_users:
-        max: 10
-      downloads_per_user:
-        min: 50
-        max: 500
-      regularity_score:
-        min: 0.7
-      file_diversity_ratio:
-        max: 0.3
-
-    course_workshop:
-      parent: legitimate_automation
-      description: "Educational courses and workshops"
-      unique_users:
-        min: 50
-        max: 500
-      downloads_per_user:
-        min: 5
-        max: 30
-      file_diversity_ratio:
-        max: 0.3
-
-  # ==========================================================================
-  # LEGACY CATEGORY RULES
-  # ==========================================================================
-  categories:
-    ci_cd_pipeline:
-      max_users: 10
-      min_downloads_per_user: 50
-      max_downloads_per_user: 500
-      max_file_diversity_ratio: 0.3
-      min_regularity_score: 0.8
-
-    research_group:
-      min_users: 5
-      max_users: 50
-      min_downloads_per_user: 10
-      max_downloads_per_user: 100
-      min_working_hours_ratio: 0.5
-      min_file_diversity_ratio: 0.3
-
-    course_workshop:
-      min_users: 50
-      max_users: 500
-      min_downloads_per_user: 5
-      max_downloads_per_user: 20
-      max_file_diversity_ratio: 0.3
 
 # ==========================================================================
 # DEEP RECONCILIATION CONFIGURATION

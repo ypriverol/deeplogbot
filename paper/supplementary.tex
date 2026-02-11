@@ -246,15 +246,13 @@ DeepLogBot computes 90+ features per location, organized into six categories. Ta
 
 \subsection{Rule-Based Method}
 
-The rule-based method applies threshold patterns from a YAML configuration file. Classification proceeds top-down through three levels:
+The rule-based method applies threshold patterns from a YAML configuration file. Classification proceeds in two stages to assign each location to one of three categories---\textbf{bot}, \textbf{hub} (legitimate automation), or \textbf{organic}:
 
 \begin{sloppypar}
 \begin{enumerate}
-    \item \textbf{Level~1 (Behavior Type):} Organic patterns match on \texttt{working\_hours\_ratio}~$\geq 0.4$ and \texttt{regularity\_score}~$\leq 0.6$, or \texttt{interval\_cv}~$\geq 0.7$, or \texttt{unique\_users}~$< 50$ with moderate activity. Automated patterns match on \texttt{regularity\_score}~$\geq 0.7$, or \texttt{night\_activity\_ratio}~$\geq 0.35$ with low working hours, or \texttt{user\_coordination\_score}~$\geq 0.6$ with many users.
+    \item \textbf{Stage~1 (Organic vs.\ Automated):} Organic patterns match on \texttt{working\_hours\_ratio}~$\geq 0.4$ and \texttt{regularity\_score}~$\leq 0.6$, or \texttt{interval\_cv}~$\geq 0.7$, or \texttt{unique\_users}~$< 50$ with moderate activity. Automated patterns match on \texttt{regularity\_score}~$\geq 0.7$, or \texttt{night\_activity\_ratio}~$\geq 0.35$ with low working hours, or \texttt{user\_coordination\_score}~$\geq 0.6$ with many users.
 
-    \item \textbf{Level~2 (Automation Category):} Bot patterns include many-users-low-downloads (\texttt{unique\_users}~$\geq 1000$, \texttt{downloads\_per\_user}~$\leq 50$), coordinated activity (\texttt{coordination\_score}~$\geq 0.7$, \texttt{authenticity\_score}~$\leq 0.4$), and suspicious timing (\texttt{night\_activity\_ratio}~$\geq 0.5$, \texttt{working\_hours\_ratio}~$\leq 0.2$). Legitimate automation matches on mirror patterns (\texttt{downloads\_per\_user}~$\geq 500$, \texttt{unique\_users}~$\leq 100$) or CI/CD patterns (\texttt{users}~$\leq 10$, \texttt{regularity}~$\geq 0.7$).
-
-    \item \textbf{Level~3 (Subcategory):} Nine subcategories provide granular classification within each automation category.
+    \item \textbf{Stage~2 (Bot vs.\ Hub):} Among automated locations, bot patterns include many-users-low-downloads (\texttt{unique\_users}~$\geq 1000$, \texttt{downloads\_per\_user}~$\leq 50$), coordinated activity (\texttt{coordination\_score}~$\geq 0.7$, \texttt{authenticity\_score}~$\leq 0.4$), and suspicious timing (\texttt{night\_activity\_ratio}~$\geq 0.5$, \texttt{working\_hours\_ratio}~$\leq 0.2$). Hub patterns match on mirror-like behavior (\texttt{downloads\_per\_user}~$\geq 500$, \texttt{unique\_users}~$\leq 100$) or CI/CD patterns (\texttt{users}~$\leq 10$, \texttt{regularity}~$\geq 0.7$).
 \end{enumerate}
 \end{sloppypar}
 
@@ -271,11 +269,11 @@ The deep method implements a five-stage learned pipeline that replaces hand-tune
 
     \item \textbf{Temporal Consistency.} Modified z-score spike detection without fixed thresholds identifies temporal anomalies by comparing each location's download patterns against robust statistical baselines.
 
-    \item \textbf{Fusion Meta-Learner.} A gradient-boosted classifier combines all anomaly signals---VAE reconstruction error, deep IF scores, temporal anomaly scores, and 33 behavioral features---into calibrated three-class probabilities (bot/hub/organic) via Platt scaling.
+    \item \textbf{Fusion Meta-Learner.} A gradient-boosted classifier combines all anomaly signals - VAE reconstruction error, deep IF scores, temporal anomaly scores, and 33 behavioral features - into calibrated three-class probabilities (bot/hub/organic) via Platt scaling.
 \end{enumerate}
 
 \begin{sloppypar}
-Additionally, soft priors encode pre-filter signals as continuous features (no hard lockout), and a reconciliation step overrides predictions when the pipeline and pre-filter strongly disagree. Post-classification stages include hub protection (preventing legitimate automation from being misclassified as bots) and detailed subcategory assignment.
+Additionally, soft priors encode pre-filter signals as continuous features (no hard lockout), and a reconciliation step overrides predictions when the pipeline and pre-filter strongly disagree. A post-classification hub protection step prevents legitimate automation from being misclassified as bots.
 \end{sloppypar}
 
 
@@ -393,7 +391,7 @@ On the 1M-record benchmark sample, the two methods produce different classificat
 
 \subsection{Full-Dataset Classification}
 
-The Deep method---the best-performing algorithm in our benchmark (macro F1 = 0.775)---was applied to the complete dataset of 71,133 locations aggregated from 159.3 million download records. The classification results are summarized in Figure~\ref{fig:classification_dist}:
+The Deep method - the best-performing algorithm in our benchmark (macro F1 = 0.775) - was applied to the complete dataset of 71,133 locations aggregated from 159.3 million download records. The classification results are summarized in Figure~\ref{fig:classification_dist}:
 
 \begin{itemize}
     \item \textbf{Bot:} 37,779 locations (53.1\%), accounting for 88.0\% of downloads
@@ -408,7 +406,7 @@ The Deep method---the best-performing algorithm in our benchmark (macro F1 = 0.7
 \label{fig:classification_dist}
 \end{figure}
 
-The asymmetry between location counts and download volumes is striking: bots generate far more traffic per location on average, while institutional hubs---though comprising only 0.9\% of locations---account for 11.3\% of all download volume.
+The asymmetry between location counts and download volumes is striking: bots generate far more traffic per location on average, while institutional hubs - though comprising only 0.9\% of locations - account for 11.3\% of all download volume.
 
 \subsection{Geographic Impact of Bot Removal}
 

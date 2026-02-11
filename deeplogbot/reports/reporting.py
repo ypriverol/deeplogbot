@@ -322,36 +322,6 @@ class ReportGenerator:
             f.write(f"{country:<18} {city:<22} {int(row['unique_users']):>10,} "
                    f"{row['downloads_per_user']:>10.1f}\n")
     
-    def _write_detailed_category_breakdown(self, f, df: pd.DataFrame):
-        """Write detailed category breakdown section."""
-        if 'detailed_category' not in df.columns:
-            return
-
-        f.write("\n" + "=" * 80 + "\n")
-        f.write("DETAILED CATEGORY BREAKDOWN\n")
-        f.write("=" * 80 + "\n")
-        f.write("Granular classification of location usage patterns:\n\n")
-
-        for category in df['detailed_category'].unique():
-            if pd.isna(category):
-                continue
-            cat_df = df[df['detailed_category'] == category]
-            if len(cat_df) == 0:
-                continue
-
-            f.write(f"\n{category.upper()}: {len(cat_df):,} locations\n")
-            f.write(f"  Total downloads: {cat_df['total_downloads'].sum():,.0f}\n")
-            f.write(f"  Avg users: {cat_df['unique_users'].mean():.1f}\n")
-            f.write(f"  Avg DL/user: {cat_df['downloads_per_user'].mean():.1f}\n")
-
-            # Add behavioral features if available
-            if 'working_hours_ratio' in cat_df.columns:
-                f.write(f"  Avg working hours ratio: {cat_df['working_hours_ratio'].mean():.2f}\n")
-            if 'file_diversity_ratio' in cat_df.columns:
-                f.write(f"  Avg file diversity: {cat_df['file_diversity_ratio'].mean():.2f}\n")
-            if 'regularity_score' in cat_df.columns:
-                f.write(f"  Avg regularity score: {cat_df['regularity_score'].mean():.2f}\n")
-
     def _write_hierarchical_classification_summary(self, f, df: pd.DataFrame):
         """Write hierarchical classification summary section."""
         # Check if hierarchical columns exist
@@ -394,30 +364,6 @@ class ReportGenerator:
                     f.write(f"  {ac.upper()}: {count:,} locations ({pct:.1f}% of automated)\n")
                     f.write(f"    Total downloads: {format_number(downloads)}\n")
 
-        # Level 3: Subcategories
-        if 'subcategory' in df.columns:
-            f.write("\nLEVEL 3 - SUBCATEGORIES\n")
-            f.write("-" * 40 + "\n")
-
-            # Group by parent category
-            organic_subcats = df[df['behavior_type'] == 'organic']['subcategory'].value_counts()
-            bot_subcats = df[df['automation_category'] == 'bot']['subcategory'].value_counts()
-            legit_subcats = df[df['automation_category'] == 'legitimate_automation']['subcategory'].value_counts()
-
-            f.write("\n  ORGANIC subcategories:\n")
-            for subcat, count in organic_subcats.items():
-                pct = count / total * 100
-                f.write(f"    {subcat}: {count:,} ({pct:.1f}%)\n")
-
-            f.write("\n  BOT subcategories:\n")
-            for subcat, count in bot_subcats.items():
-                pct = count / total * 100
-                f.write(f"    {subcat}: {count:,} ({pct:.1f}%)\n")
-
-            f.write("\n  LEGITIMATE_AUTOMATION subcategories:\n")
-            for subcat, count in legit_subcats.items():
-                pct = count / total * 100
-                f.write(f"    {subcat}: {count:,} ({pct:.1f}%)\n")
     
     
     def generate(self, df: pd.DataFrame, bot_locs: pd.DataFrame, hub_locs: pd.DataFrame, 
@@ -474,8 +420,6 @@ class ReportGenerator:
 
             # Write hierarchical classification summary (new taxonomy)
             self._write_hierarchical_classification_summary(f, df)
-
-            self._write_detailed_category_breakdown(f, df)
 
             self._write_city_level_aggregation(f, df, city_field)
             self._write_bot_locations(f, bot_locs, city_field)

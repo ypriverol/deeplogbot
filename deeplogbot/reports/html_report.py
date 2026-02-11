@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..config import HUB_SUBCATEGORIES
 from ..utils import logger
 
 
@@ -438,8 +437,8 @@ class HTMLReportGenerator:
         if category == 'bot' and 'automation_category' in df.columns:
             subset = df[df['automation_category'] == 'bot'].sort_values('unique_users', ascending=False).head(top_n)
             badge_class = 'badge-bot'
-        elif category == 'hub' and 'subcategory' in df.columns:
-            subset = df[df['subcategory'].isin(HUB_SUBCATEGORIES)].sort_values('downloads_per_user', ascending=False).head(top_n)
+        elif category == 'hub' and 'is_hub' in df.columns:
+            subset = df[df['is_hub']].sort_values('downloads_per_user', ascending=False).head(top_n)
             badge_class = 'badge-hub'
         else:
             return ""
@@ -528,17 +527,6 @@ class HTMLReportGenerator:
                 </div>
                 """)
             html_parts.append('</div>')
-
-        # Level 3: Subcategories
-        if 'subcategory' in hier and 'by_parent' in hier['subcategory']:
-            html_parts.append('<h3>Level 3: Subcategories</h3>')
-            for parent, subcats in hier['subcategory']['by_parent'].items():
-                if subcats:
-                    html_parts.append(f'<h4 style="margin-top: 15px;">{parent.upper().replace("_", " ")}</h4>')
-                    html_parts.append('<table><thead><tr><th>Subcategory</th><th>Count</th></tr></thead><tbody>')
-                    for subcat, count in subcats.items():
-                        html_parts.append(f'<tr><td>{subcat}</td><td>{count:,}</td></tr>')
-                    html_parts.append('</tbody></table>')
 
         html_parts.append('</section>')
         return ''.join(html_parts)
